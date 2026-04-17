@@ -1,0 +1,41 @@
+
+> gov-writing-new-web@1.0.0 dev
+> vite --host 127.0.0.1 --port 4173
+
+
+  VITE v5.4.21  ready in 453 ms
+
+  ➜  Local:   http://127.0.0.1:4173/
+9:59:15 AM [vite] hmr update /src/App.vue, /src/views/EditorView.vue, /src/views/WorkspaceView.vue, /src/views/HomeView.vue, /src/views/SettingsView.vue, /src/components/AppSidebar.vue
+9:59:27 AM [vite] hmr update /src/views/HomeView.vue
+10:58:39 AM [vite] hmr update /src/App.vue, /src/views/EditorView.vue, /src/views/WorkspaceView.vue, /src/views/HomeView.vue, /src/views/SettingsView.vue, /src/components/AppSidebar.vue
+10:59:11 AM [vite] hmr update /src/App.vue, /src/views/EditorView.vue, /src/views/WorkspaceView.vue, /src/views/HomeView.vue, /src/views/SettingsView.vue, /src/components/AppSidebar.vue
+10:59:17 AM [vite] hmr update /src/App.vue, /src/views/EditorView.vue, /src/views/WorkspaceView.vue, /src/views/HomeView.vue, /src/views/SettingsView.vue, /src/components/AppSidebar.vue
+10:59:28 AM [vite] hmr update /src/views/HomeView.vue
+10:59:37 AM [vite] hmr update /src/components/PromptMenu.vue
+10:59:58 AM [vite] hmr update /src/components/StepTimeline.vue
+11:00:05 AM [vite] hmr update /src/components/MessageStream.vue
+11:00:15 AM [vite] hmr update /src/components/PromptMenu.vue
+11:00:25 AM [vite] hmr update /src/views/HomeView.vue
+3:56:17 PM [vite] hmr update /src/views/SettingsView.vue
+3:57:22 PM [vite] hmr update /src/style.css
+4:37:27 PM [vite] hmr update /src/components/StepTimeline.vue
+4:37:49 PM [vite] hmr update /src/components/MessageStream.vue
+4:47:47 PM [vite] hmr update /src/components/MessageStream.vue
+4:48:02 PM [vite] hmr update /src/style.css
+5:03:10 PM [vite] hmr update /src/views/HomeView.vue
+5:11:42 PM [vite] hmr update /src/views/HomeView.vue
+5:39:32 PM [vite] hmr update /src/views/HomeView.vue
+5:39:33 PM [vite] hmr update /src/views/HomeView.vue
+5:39:35 PM [vite] hmr update /src/views/HomeView.vue
+5:39:36 PM [vite] hmr update /src/views/HomeView.vue
+5:39:41 PM [vite] hmr update /src/components/ComposerDock.vue
+5:39:43 PM [vite] hmr update /src/components/ComposerDock.vue
+5:39:52 PM [vite] hmr update /src/components/ComposerDock.vue
+5:39:54 PM [vite] hmr update /src/views/HomeView.vue
+5:39:54 PM [vite] hmr update /src/views/HomeView.vue
+5:41:51 PM [vite] hmr update /src/App.vue, /src/views/EditorView.vue, /src/views/WorkspaceView.vue, /src/views/HomeView.vue, /src/views/SettingsView.vue, /src/components/AppSidebar.vue, /src/components/CloudFilePicker.vue
+5:41:53 PM [vite] hmr update /src/App.vue, /src/views/EditorView.vue, /src/views/WorkspaceView.vue, /src/views/HomeView.vue, /src/views/SettingsView.vue, /src/components/AppSidebar.vue, /src/components/CloudFilePicker.vue
+5:42:28 PM [vite] hmr update /src/App.vue, /src/views/EditorView.vue, /src/views/WorkspaceView.vue, /src/views/HomeView.vue, /src/views/SettingsView.vue, /src/components/AppSidebar.vue, /src/components/CloudFilePicker.vue
+5:42:29 PM [vite] hmr update /src/App.vue, /src/views/EditorView.vue, /src/views/WorkspaceView.vue, /src/views/HomeView.vue, /src/views/SettingsView.vue, /src/components/AppSidebar.vue, /src/components/CloudFilePicker.vue
+5:42:47 PM [vite] hmr update /src/components/ComposerDock.vue

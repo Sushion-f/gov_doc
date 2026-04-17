@@ -1,0 +1,37 @@
+[
+  {
+    "id": "annotation-1",
+    "label": "问题 1",
+    "description": "您好！我需要您提供需要查重的文章内容，才能为您进行文本重复风险分析。",
+    "start": 10,
+    "end": 44
+  },
+  {
+    "id": "annotation-2",
+    "label": "问题 2",
+    "description": "请将需要检测的文章文本粘贴到对话框中，我会为您：",
+    "start": 20,
+    "end": 44
+  },
+  {
+    "id": "annotation-3",
+    "label": "问题 3",
+    "description": "1. **指出重复风险高的部分**",
+    "start": 30,
+    "end": 47
+  },
+  {
+    "id": "annotation-4",
+    "label": "问题 4",
+    "description": "2. **给出相似来源或相似片段类型**",
+    "start": 40,
+    "end": 60
+  },
+  {
+    "id": "annotation-5",
+    "label": "问题 5",
+    "description": "3. **提供必要的改写建议**",
+    "start": 50,
+    "end": 66
+  }
+]
