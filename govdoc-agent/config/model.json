@@ -1,12 +1,22 @@
 {
   "llm": {
-    "base_url": "https://ark.cn-beijing.volces.com/api/coding/v3",
+    "base_url": "http://10.108.8.116:20081/v1",
     "chat_completions_url": "",
-    "api_key": "56f18f44-ed82-4b96-9f7e-a310068aebc8",
-    "default_model": "MiniMax-M2.5",
+    "api_key": "none",
+    "default_model": "Qwen3-235B-A22B-FP8",
     "available_models": [
-      { "id": "MiniMax-M2.5", "label": "MiniMax M2.5" },
-      { "id": "qwen3.5-397b-a17b", "label": "通义 Qwen3.5 397B" }
+      {
+        "id": "Qwen3-235B-A22B-FP8",
+        "label": "Qwen3-235B-A22B-FP8"
+      },
+      {
+        "id": "MiniMax-M2.5",
+        "label": "MiniMax M2.5"
+      },
+      {
+        "id": "qwen3.5-397b-a17b",
+        "label": "通义 Qwen3.5 397B"
+      }
     ],
     "timeout_seconds": 90,
     "enable_planner": true,

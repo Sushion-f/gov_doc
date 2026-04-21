@@ -1,82 +1,120 @@
-import json
-from html import escape
-from typing import Any, Callable
+"""
+LLM 模型调用封装模块。
 
-import requests
+本模块提供与 OpenAI 兼容的 chat/completions 接口调用功能，支持：
+- 流式响应处理
+- 工具调用
+- 模型名称解析和别名处理
+- 消息构建（包含系统提示、上下文等）
+- JSON 提取和错误处理
+"""
 
-from agents import canonical_agent_name, system_prompt_for_agent
-from .config import settings
-from .debug_log import log_stage
+import json  # 用于处理 JSON 数据
+from html import escape  # 用于 HTML 转义，防止 XSS 攻击
+from typing import Any, Callable  # 类型注解，提高代码可读性
+
+import requests  # HTTP 请求库，用于调用模型 API
+
+from agents import canonical_agent_name, system_prompt_for_agent  # Agent 相关函数
+from .config import settings  # 应用配置，包含模型调用相关设置
+from .debug_log import log_stage  # 调试日志记录函数
 
 
-# 仅保留「短别名 → 当前默认接入点」；真实 model id 不在此表则原样传给网关。
+# 模型别名映射表，将常见模型别名映射到默认模型
+# 仅保留「短别名 → 当前默认接入点」；真实 model id 不在此表则原样传给网关
 MODEL_ALIASES = {
-    "minimax": settings.llm_default_model,
-    "qwen 3.5": settings.llm_default_model,
-    "qwen3-max": settings.llm_default_model,
-    "deepseek": settings.llm_default_model,
-    "deepseek-chat": settings.llm_default_model,
+    "minimax": settings.llm_default_model,  # Minimax 模型别名
+    "qwen 3.5": settings.llm_default_model,  # 通义千问 3.5 模型别名
+    "qwen3-max": settings.llm_default_model,  # 通义千问 3.5 Max 模型别名
+    "deepseek": settings.llm_default_model,  # DeepSeek 模型别名
+    "deepseek-chat": settings.llm_default_model,  # DeepSeek Chat 模型别名
 }
 
+
 class LLMCallError(RuntimeError):
+    """LLM 调用异常类，用于表示模型调用过程中的错误。"""
     pass
 
 
+# 辅助函数：获取完整的 chat/completions API URL
 def chat_completions_post_url() -> str:
-    """OpenAI 兼容 chat/completions 的完整 URL，仅来自 model.json。"""
+    """获取 OpenAI 兼容的 chat/completions 完整 URL。"""
+    # 优先使用直接配置的 chat_completions_url
     full = (settings.llm_chat_completions_url or "").strip().rstrip("/")
     if full:
         return full
+    # 如果没有直接配置，则使用 base_url 拼接
     base = (settings.llm_base_url or "").strip().rstrip("/")
     if not base:
         return ""
     return f"{base}/chat/completions"
 
 
+# 辅助函数：解析模型名称
 def resolve_model_name(requested_model: str | None) -> str:
+    """解析模型名称，支持别名处理。"""
+    # 规范化输入模型名称
     normalized = (requested_model or "").strip()
     if not normalized:
+        # 如果未指定模型，使用默认模型
         return settings.llm_default_model
+    # 查找别名映射，否则返回原始名称
     return MODEL_ALIASES.get(normalized.lower(), normalized)
 
 
+# 核心函数：构建模型输入消息
 def build_messages(
-    content: str,
-    skill: str | None,
-    runtime_context: dict | None = None,
-    memory_context: dict | None = None,
-    task_packet: dict | None = None,
+    content: str,  # 用户输入内容
+    skill: str | None,  # 技能名称
+    runtime_context: dict | None = None,  # 运行时上下文
+    memory_context: dict | None = None,  # 记忆上下文
+    task_packet: dict | None = None,  # 任务包
 ):
+    """构建消息列表，包含系统提示和各种上下文信息。"""
+    # 获取对应技能的系统提示词
     system_prompt = system_prompt_for_agent(canonical_agent_name(skill) or "general")
+    # 初始化消息列表，添加系统提示
     messages = [{"role": "system", "content": system_prompt}]
 
+    # 收集上下文信息
     context_lines: list[str] = []
+
+    # 添加任务包信息（如果有）
     if task_packet:
         context_lines.extend(
             [
                 "当前由 leader agent 下发结构化任务，请遵守执行契约。",
-                f"- objective: {task_packet.get('objective') or ''}",
-                f"- scope: {task_packet.get('scope') or ''}",
-                f"- reporting_contract: {task_packet.get('reporting_contract') or ''}",
-                f"- escalation_policy: {task_packet.get('escalation_policy') or ''}",
+                f"- objective: {task_packet.get('objective') or ''}",  # 任务目标
+                f"- scope: {task_packet.get('scope') or ''}",  # 任务范围
+                f"- reporting_contract: {task_packet.get('reporting_contract') or ''}",  # 报告契约
+                f"- escalation_policy: {task_packet.get('escalation_policy') or ''}",  # 升级策略
             ]
         )
+
+    # 添加运行上下文（如果有）
     if runtime_context:
-        summary = runtime_context.get("summary") or ""
-        recent_messages = runtime_context.get("recent_messages") or []
+        summary = runtime_context.get("summary") or ""  # 上下文摘要
+        recent_messages = runtime_context.get("recent_messages") or []  # 最近消息
         if summary:
             context_lines.append("运行上下文摘要：")
             context_lines.append(summary)
         if recent_messages:
             context_lines.append("最近消息：")
+            # 只取最近 4 条消息，避免上下文过长
             for item in recent_messages[-4:]:
                 role = item.get("role") or "unknown"
                 text = (item.get("content") or "").strip()
                 context_lines.append(f"- {role}: {text}")
+
+    # 添加记忆上下文（如果有）
     if memory_context:
+        # 用户身份偏好
         identify_md = (memory_context.get("identify_markdown") or "").strip()
+        # 长期记忆
         memory_md = (memory_context.get("memory_markdown") or "").strip()
+        # 最近会话摘要
         session_summary = (memory_context.get("session_summary_markdown") or "").strip()
+
         if identify_md:
             context_lines.append("用户身份偏好：")
             context_lines.append(identify_md)
@@ -87,108 +125,161 @@ def build_messages(
             context_lines.append("最近会话摘要：")
             context_lines.append(session_summary)
 
+    # 将上下文信息添加到消息列表
     if context_lines:
         messages.append({"role": "system", "content": "\n".join(context_lines)})
 
+    # 添加用户消息
     messages.append({"role": "user", "content": content})
     return messages
 
 
+# 辅助函数：从文本中提取 JSON 对象
 def extract_json_object(text: str) -> dict:
+    """从模型返回的文本中提取 JSON 对象。"""
+    # 规范化输入文本
     normalized = (text or "").strip()
     if not normalized:
         raise LLMCallError("模型未返回可解析的 JSON 内容")
 
+    # 准备候选 JSON 字符串
     candidates = [normalized]
+
+    # 处理代码块中的 JSON
     if "```" in normalized:
+        # 查找 JSON 对象的开始和结束位置
         start = normalized.find("{")
         end = normalized.rfind("}")
         if start >= 0 and end > start:
             candidates.append(normalized[start : end + 1])
     else:
+        # 直接查找 JSON 对象
         start = normalized.find("{")
         end = normalized.rfind("}")
         if start >= 0 and end > start:
             candidates.append(normalized[start : end + 1])
 
+    # 尝试解析每个候选字符串
     for candidate in candidates:
         try:
             data = json.loads(candidate)
         except json.JSONDecodeError:
+            # 解析失败，尝试下一个候选
             continue
         if isinstance(data, dict):
+            # 成功解析为字典，返回结果
             return data
 
+    # 所有候选都解析失败
     raise LLMCallError("模型返回的规划结果不是有效 JSON 对象")
 
 
+# 辅助函数：处理消息内容
 def _coerce_message_text(message: dict) -> str:
+    """处理消息内容，支持字符串和列表格式。"""
     content = message.get("content")
     if isinstance(content, str):
+        # 字符串格式，直接返回
         return content.strip()
     if isinstance(content, list):
+        # 列表格式，提取文本内容
         return "\n".join(
             item.get("text", "").strip()
             for item in content
             if isinstance(item, dict) and item.get("type") in {"text", "output_text"}
         ).strip()
+    # 其他格式，返回空字符串
     return ""
 
 
+# 辅助函数：处理流式响应的 delta 文本
 def _coerce_delta_text(value: Any) -> str:
+    """处理流式响应的 delta 文本。"""
     if isinstance(value, str):
+        # 字符串格式，直接返回
         return value
     if isinstance(value, list):
+        # 列表格式，提取文本内容
         return "".join(
             item.get("text", "")
             for item in value
             if isinstance(item, dict) and item.get("type") in {"text", "output_text"}
         )
+    # 其他格式，返回空字符串
     return ""
 
 
+# 辅助函数：合并工具调用块
 def _merge_tool_call_chunks(existing: list[dict], delta_calls: list[dict]) -> list[dict]:
+    """合并工具调用块，处理流式响应中的工具调用信息。"""
+    # 复制现有工具调用列表
     merged = list(existing or [])
+
+    # 处理每个 delta 工具调用
     for delta_call in delta_calls or []:
         if not isinstance(delta_call, dict):
+            # 不是字典格式，跳过
             continue
+
+        # 获取工具调用索引
         index = delta_call.get("index")
         if not isinstance(index, int):
+            # 没有索引，添加到末尾
             index = len(merged)
+
+        # 确保 merged 列表长度足够
         while len(merged) <= index:
+            # 添加默认工具调用结构
             merged.append({"id": "", "type": "function", "function": {"name": "", "arguments": ""}})
+
+        # 更新工具调用信息
         current = merged[index]
         current["id"] = delta_call.get("id") or current.get("id") or ""
         current["type"] = delta_call.get("type") or current.get("type") or "function"
+
+        # 更新函数信息
         current_function = current.setdefault("function", {})
         delta_function = delta_call.get("function") or {}
         current_function["name"] = delta_function.get("name") or current_function.get("name") or ""
+        # 拼接参数（流式响应中参数可能分块返回）
         current_function["arguments"] = (
             (current_function.get("arguments") or "") + (delta_function.get("arguments") or "")
         )
+
     return merged
 
 
+# 核心函数：原始模型调用
 def call_chat_model_with_messages_raw(
-    messages: list[dict],
-    requested_model: str | None,
+    messages: list[dict],  # 消息列表
+    requested_model: str | None,  # 请求的模型名称
     *,
-    purpose: str = "chat",
-    temperature: float = 0.4,
-    extra_payload: dict | None = None,
-    stream: bool = False,
-    on_stream_event: Callable[[dict[str, Any]], None] | None = None,
+    purpose: str = "chat",  # 调用目的
+    temperature: float = 0.4,  # 温度参数，控制生成文本的随机性
+    extra_payload: dict | None = None,  # 额外的请求参数
+    stream: bool = False,  # 是否使用流式响应
+    on_stream_event: Callable[[dict[str, Any]], None] | None = None,  # 流式事件回调
 ):
+    """原始调用模型，返回完整响应。"""
+    # 解析模型名称
     model_name = resolve_model_name(requested_model)
+
+    # 构建请求负载
     payload = {
-        "model": model_name,
-        "messages": messages,
-        "temperature": temperature,
-        "stream": stream,
+        "model": model_name,  # 模型名称
+        "messages": messages,  # 消息列表
+        "temperature": temperature,  # 温度参数
+        "stream": stream,  # 是否使用流式响应
     }
+
+    # 添加额外参数
     if extra_payload:
         payload.update(extra_payload)
+
+    # 获取 API URL
     post_url = chat_completions_post_url()
+
+    # 记录调试日志
     log_stage(
         f"llm.request.{purpose}",
         {
@@ -203,48 +294,67 @@ def call_chat_model_with_messages_raw(
         max_chars=settings.debug_log_max_chars,
         max_string_chars=settings.debug_log_max_string_chars,
     )
+
+    # 检查 URL 是否配置
     if not post_url:
         raise LLMCallError("model.json 未配置 llm.base_url 或 llm.chat_completions_url，无法调用模型")
+
     try:
+        # 发送 HTTP 请求
         response = requests.post(
             post_url,
             headers={
-                "Authorization": f"Bearer {settings.llm_api_key}",
-                "Content-Type": "application/json",
+                "Authorization": f"Bearer {settings.llm_api_key}",  # API 密钥
+                "Content-Type": "application/json",  # 内容类型
             },
-            json=payload,
-            timeout=settings.llm_timeout_seconds,
-            stream=stream,
+            json=payload,  # 请求体
+            timeout=settings.llm_timeout_seconds,  # 超时设置
+            stream=stream,  # 是否流式响应
         )
+
+        # 检查响应状态
         response.raise_for_status()
-        # 流式接口常省略 charset；requests 可能按 ISO-8859-1 解码，导致 UTF-8 中文变成 mojibake
+
+        # 处理编码问题
         enc = (response.encoding or "").lower()
         if not enc or enc in ("iso-8859-1", "latin-1"):
             response.encoding = "utf-8"
+
+        # 处理流式响应
         if stream:
-            text_parts: list[str] = []
-            reasoning_parts: list[str] = []
-            tool_calls: list[dict] = []
-            chunks: list[dict] = []
+            text_parts: list[str] = []  # 文本部分
+            reasoning_parts: list[str] = []  # 推理部分
+            tool_calls: list[dict] = []  # 工具调用
+            chunks: list[dict] = []  # 原始响应块
+
+            # 迭代处理响应流
             for raw in response.iter_lines(decode_unicode=False):
                 if not raw:
                     continue
+
+                # 解码响应行
                 try:
                     line = raw.decode("utf-8").strip()
                 except UnicodeDecodeError:
+                    # 处理解码错误
                     line = raw.decode("utf-8", errors="replace").strip()
+
+                # 跳过非 data 行
                 if not line.startswith("data:"):
                     continue
+
+                # 提取数据部分
                 chunk_text = line[5:].strip()
                 if not chunk_text or chunk_text == "[DONE]":
                     if chunk_text == "[DONE]":
                         break
                     continue
+
+                # 解析 JSON
                 try:
                     data = json.loads(chunk_text)
                 except json.JSONDecodeError as exc:
-                    # 部分网关/代理会偶发推送非完整 JSON 行；整段失败会表现为
-                    # "Unterminated string starting at: line 1 column N"。跳过坏行以免整次 skill 崩溃。
+                    # 记录解析错误并跳过
                     log_stage(
                         "llm.stream.chunk_json_skip",
                         {
@@ -258,31 +368,45 @@ def call_chat_model_with_messages_raw(
                         max_string_chars=settings.debug_log_max_string_chars,
                     )
                     continue
+
+                # 保存原始数据
                 chunks.append(data)
+
+                # 处理响应选择
                 choices = data.get("choices") or []
                 if not choices:
                     continue
+
+                # 提取 delta 信息
                 delta = choices[0].get("delta") or {}
-                delta_text = _coerce_delta_text(delta.get("content"))
+                delta_text = _coerce_delta_text(delta.get("content"))  # 文本内容
                 delta_reasoning = _coerce_delta_text(
                     delta.get("reasoning_content") or delta.get("reasoning") or delta.get("reasoningContent")
-                )
+                )  # 推理内容
+
+                # 累积文本和推理内容
                 if delta_text:
                     text_parts.append(delta_text)
                 if delta_reasoning:
                     reasoning_parts.append(delta_reasoning)
+
+                # 处理工具调用
                 tool_calls = _merge_tool_call_chunks(tool_calls, delta.get("tool_calls") or [])
+
+                # 触发流式事件回调
                 if on_stream_event and (delta_text or delta_reasoning):
                     on_stream_event(
                         {
-                            "textDelta": delta_text,
-                            "reasoningDelta": delta_reasoning,
-                            "text": "".join(text_parts),
-                            "reasoning": "".join(reasoning_parts),
-                            "toolCalls": tool_calls,
-                            "raw": data,
+                            "textDelta": delta_text,  # 文本增量
+                            "reasoningDelta": delta_reasoning,  # 推理增量
+                            "text": "".join(text_parts),  # 完整文本
+                            "reasoning": "".join(reasoning_parts),  # 完整推理
+                            "toolCalls": tool_calls,  # 工具调用
+                            "raw": data,  # 原始数据
                         }
                     )
+
+            # 构建最终消息
             text = "".join(text_parts).strip()
             reasoning_content = "".join(reasoning_parts).strip()
             message = {
@@ -290,19 +414,30 @@ def call_chat_model_with_messages_raw(
                 "content": text,
                 "reasoning_content": reasoning_content,
             }
+
+            # 添加工具调用
             if tool_calls:
                 message["tool_calls"] = tool_calls
+
+            # 构建响应数据
             data = {"object": "chat.completion.chunk.stream", "chunks": chunks, "message": message}
         else:
+            # 处理非流式响应
             data = response.json()
             choices = data.get("choices") or []
             if not choices:
                 raise LLMCallError("模型返回空结果")
             message = choices[0].get("message") or {}
+
+        # 提取文本和工具调用
         text = _coerce_message_text(message)
         tool_calls = message.get("tool_calls") or []
+
+        # 检查返回内容
         if not text and not tool_calls:
             raise LLMCallError("模型返回内容为空")
+
+        # 记录响应日志
         log_stage(
             f"llm.response.{purpose}",
             {
@@ -317,14 +452,17 @@ def call_chat_model_with_messages_raw(
             max_chars=settings.debug_log_max_chars,
             max_string_chars=settings.debug_log_max_string_chars,
         )
+
+        # 返回响应结果
         return {
-            "model_name": model_name,
-            "text": text,
-            "message": message,
-            "tool_calls": tool_calls,
-            "raw": data,
+            "model_name": model_name,  # 使用的模型名称
+            "text": text,  # 模型返回的文本
+            "message": message,  # 完整消息
+            "tool_calls": tool_calls,  # 工具调用
+            "raw": data,  # 原始响应数据
         }
     except requests.RequestException as exc:
+        # 记录错误日志
         log_stage(
             f"llm.error.{purpose}",
             {
@@ -336,19 +474,23 @@ def call_chat_model_with_messages_raw(
             max_chars=settings.debug_log_max_chars,
             max_string_chars=settings.debug_log_max_string_chars,
         )
+        # 抛出异常
         raise LLMCallError(f"模型调用失败: {exc}") from exc
 
 
+# 核心函数：调用模型并确保返回非空内容
 def call_chat_model_with_messages(
-    messages: list[dict],
-    requested_model: str | None,
+    messages: list[dict],  # 消息列表
+    requested_model: str | None,  # 请求的模型名称
     *,
-    purpose: str = "chat",
-    temperature: float = 0.4,
-    extra_payload: dict | None = None,
-    stream: bool = False,
-    on_stream_event: Callable[[dict[str, Any]], None] | None = None,
+    purpose: str = "chat",  # 调用目的
+    temperature: float = 0.4,  # 温度参数
+    extra_payload: dict | None = None,  # 额外参数
+    stream: bool = False,  # 是否使用流式响应
+    on_stream_event: Callable[[dict[str, Any]], None] | None = None,  # 流式事件回调
 ):
+    """调用模型，确保返回非空内容。"""
+    # 调用原始模型函数
     response = call_chat_model_with_messages_raw(
         messages,
         requested_model,
@@ -358,42 +500,61 @@ def call_chat_model_with_messages(
         stream=stream,
         on_stream_event=on_stream_event,
     )
+
+    # 检查返回内容是否为空
     if not response["text"]:
         raise LLMCallError("模型返回内容为空")
+
     return response
 
 
+# 核心函数：完整模型调用流程
 def call_chat_model(
-    content: str,
-    skill: str | None,
-    requested_model: str | None,
-    runtime_context: dict | None = None,
-    memory_context: dict | None = None,
-    task_packet: dict | None = None,
+    content: str,  # 用户输入内容
+    skill: str | None,  # 技能名称
+    requested_model: str | None,  # 请求的模型名称
+    runtime_context: dict | None = None,  # 运行时上下文
+    memory_context: dict | None = None,  # 记忆上下文
+    task_packet: dict | None = None,  # 任务包
     *,
-    stream: bool = False,
-    on_stream_event: Callable[[dict[str, Any]], None] | None = None,
+    stream: bool = False,  # 是否使用流式响应
+    on_stream_event: Callable[[dict[str, Any]], None] | None = None,  # 流式事件回调
 ):
+    """完整调用模型流程，包括消息构建。"""
+    # 构建消息列表
     messages = build_messages(content, skill, runtime_context, memory_context, task_packet)
+
+    # 调用模型
     return call_chat_model_with_messages(
         messages,
         requested_model,
-        purpose=f"skill.{skill or 'general'}",
-        temperature=0.4,
-        stream=stream,
-        on_stream_event=on_stream_event,
+        purpose=f"skill.{skill or 'general'}",  # 构建调用目的
+        temperature=0.4,  # 温度参数
+        stream=stream,  # 是否使用流式响应
+        on_stream_event=on_stream_event,  # 流式事件回调
     )
 
 
+# 辅助函数：将纯文本转换为 HTML
 def text_to_html(text: str) -> str:
+    """将纯文本转换为 HTML 格式。"""
+    # 处理文本块
     blocks = [block.strip() for block in text.replace("\r\n", "\n").split("\n\n") if block.strip()]
     html_parts = []
+
+    # 处理每个文本块
     for block in blocks:
         lines = [line.strip() for line in block.split("\n") if line.strip()]
+
+        # 检测是否为列表
         if all(line.startswith(("-", "*", "1.", "2.", "3.")) for line in lines):
+            # 生成无序列表
             html_parts.append(
                 "<ul>" + "".join(f"<li>{escape(line.lstrip('-*1234567890. '))}</li>" for line in lines) + "</ul>"
             )
         else:
+            # 生成段落
             html_parts.append(f"<p>{escape(' '.join(lines))}</p>")
+
+    # 返回 HTML 内容，确保至少返回一个空段落
     return "".join(html_parts) or "<p></p>"
