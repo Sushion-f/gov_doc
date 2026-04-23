@@ -1,0 +1,20 @@
+{"type": "message_start", "seqNo": 1, "createdAt": "2026-04-23T03:04:04", "payload": {"phase": "prepared", "runId": "c2fdd82d-0708-41be-b221-549bc56eb866", "taskId": "task_bb4b23b7_0001", "requestedSkill": ""}}
+
+{"type": "content_block_stop", "seqNo": 2, "createdAt": "2026-04-23T03:04:33"}
+
+{"type": "content_block_start", "seqNo": 3, "createdAt": "2026-04-23T03:04:33", "index": 1, "content_block": {"type": "text", "purpose": "plan_summary", "displayText": "规划完成"}}
+
+{"type": "content_block_delta", "seqNo": 4, "createdAt": "2026-04-23T03:04:33", "index": 1, "delta": {"type": "text_delta", "text": "已完成执行计划生成与校验。"}}
+
+{"type": "content_block_stop", "seqNo": 5, "createdAt": "2026-04-23T03:04:33", "index": 1}
+
+{"type": "tool_result", "seqNo": 6, "createdAt": "2026-04-23T03:04:33", "payload": {"tool": "a2a_planning", "displayText": "已规划 2 个执行步骤", "steps": 2, "plan": {"intent": "document_workflow", "summary": "主 Agent 已规划 2 个 sub-agent 步骤。", "requiresUserInput": false, "clarificationQuestion": null, "steps": [{"index": 1, "skillName": "retrieval", "title": "资料检索", "objective": "请检索近两年五一劳动节放假安排通知的范文要素（值班安排、安全提醒、应急联络等），并归纳出一份完整放假通知应包含的要素清单；不要撰写正文。\n用户意图：生成五一放假通知", "dependsOn": [], "subtaskRole": "skill_worker", "displayTitle": "资料检索", "actionLabel": "检索", "pendingLabel": "待检索", "runningLabel": "正在检索 资料检索", "doneLabel": "检索完成", "status": "pending"}, {"index": 2, "skillName": "writing", "title": "公文写作", "objective": "请基于前序 retrieval 步骤提供的要素清单，起草一份五一劳动节放假安排的通知。要求：包含放假日期、值班安排、安全与廉政提醒、应急联系人等要素；发文机关、日期、值班人员未知处用 `{{发文机关}}` `{{值班人员}}` 等占位符。\n用户意图：生成五一放假通知", "dependsOn": ["step_01_retrieval"], "subtaskRole": "skill_worker", "displayTitle": "公文写作", "actionLabel": "起草", "pendingLabel": "待起草", "runningLabel": "正在起草 公文写作", "doneLabel": "写作完成", "status": "pending"}]}, "plannerMeta": {"planner": "main_agent_tool_calls", "fallback": false, "dispatchMode": "tool_call_dispatch", "modelName": "Qwen3-235B-A22B-FP8", "assistantText": "", "normalization": null}}}
+
+{"type": "content_block_start", "seqNo": 7, "createdAt": "2026-04-23T03:04:33", "index": 110, "content_block": {"type": "tool_use", "name": "retrieval", "skillName": "retrieval", "stepIndex": 1, "stepTitle": "资料检索", "displayText": "正在检索 资料检索"}}
+
+{"type": "content_block_delta", "seqNo": 8, "createdAt": "2026-04-23T03:04:33", "index": 110, "delta": {"type": "input_json_delta", "partial_json": "{\"subtask\": \"task_bb4b23b7_0003\", \"skill\": \"retrieval\", \"depends_on\": [], \"objective\": \"请检索近两年五一劳动节放假安排通知的范文要素（值班安排、安全提醒、应急联络等），并归纳出一份完整放假通知应包含的要素清单；不要撰写正文。\\n用户意图：生成五一放假通知\"}"}}
+
+{"type": "content_block_stop", "seqNo": 9, "createdAt": "2026-04-23T03:04:33", "index": 110}
+
+{"type": "running", "seqNo": 10, "createdAt": "2026-04-23T03:04:33", "payload": {"taskId": "task_bb4b23b7_0003", "parentTaskId": "task_bb4b23b7_0002", "skillName": "retrieval", "stepIndex": 1, "stepTitle": "资料检索", "displayText": "正在检索 资料检索"}}
+

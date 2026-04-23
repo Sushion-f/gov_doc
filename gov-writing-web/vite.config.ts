@@ -33,15 +33,8 @@ export default defineConfig({
         ws: true,
         secure: false,
       },
-      // 与线上网关路径一致；本地开发时转发到分析服务
-      '/police/analyse': {
-        target: 'https://10.108.8.116:18090',
-        changeOrigin: true,
-        secure: false,
-        rewrite: (path: any) => path.replace(/^\/police\/analyse/, '/ai-seat')
-      },
-      '/police/brain': {
-        target: 'http://localhost:8088',
+      '/api/agentloop': {
+        target: 'http://localhost:8000',
         changeOrigin: true,
         secure: false,
       },

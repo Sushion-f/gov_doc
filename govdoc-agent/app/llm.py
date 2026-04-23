@@ -36,6 +36,78 @@ class LLMCallError(RuntimeError):
     pass
 
 
+def _is_qwen_family(model_name: str | None) -> bool:
+    """判断模型是否属于 Qwen 家族（Qwen3 / Qwen3.5 / qwen... 等）。
+
+    仅对 Qwen 系启用关闭 thinking 的 hint，避免给 MiniMax 等不识别该约定的模型
+    注入无意义字段（虽然绝大多数网关会忽略未知字段，但仍尽量保守）。
+    """
+    lower = (model_name or "").lower()
+    return lower.startswith("qwen")
+
+
+def _apply_disable_thinking(
+    payload: dict[str, Any],
+    model_name: str,
+    messages: list[dict[str, Any]],
+    *,
+    include_kwargs: bool | None = None,
+) -> list[dict[str, Any]]:
+    """为 Qwen 系模型注入关闭 thinking 的请求参数。
+
+    默认只做一件事（最稳妥）：
+    - 在最后一条 user / system 消息尾部追加 ``/no_think``。
+      Qwen3 chat template 在内部匹配该 token 并跳过 <think> 段；
+      对不识别该约定的模型也是无害文本，不会触发网关参数校验错误。
+
+    仅当 ``include_kwargs=True`` 或 settings.llm_send_chat_template_kwargs 显式开启时，
+    额外在顶层注入 ``chat_template_kwargs = {"enable_thinking": false}``。该字段仅
+    部分网关（官方 vLLM / SGLang 较新版本）识别；老旧私有化部署会以 400 拒绝，
+    导致 planner LLMCallError 回退成 general，这是上一版出现的故障根因。
+
+    返回用于实际发送的 messages（深拷贝，不污染调用方对象）。
+    调用方已显式传入 chat_template_kwargs 时不再覆盖。
+    """
+    if not settings.llm_disable_thinking or not _is_qwen_family(model_name):
+        return messages
+
+    # 是否携带额外的 chat_template_kwargs —— 默认关闭以保证兼容性
+    should_send_kwargs = (
+        include_kwargs if include_kwargs is not None else settings.llm_send_chat_template_kwargs
+    )
+    if should_send_kwargs:
+        payload.setdefault("chat_template_kwargs", {"enable_thinking": False})
+
+    # 深拷贝 messages，避免修改调用方持有的对象。
+    send_messages: list[dict[str, Any]] = [dict(m) for m in messages]
+    no_think_tag = "/no_think"
+    for item in reversed(send_messages):
+        role = item.get("role")
+        if role not in ("user", "system"):
+            continue
+        content = item.get("content")
+        if isinstance(content, str):
+            if no_think_tag in content:
+                break
+            sep = "" if content.endswith(("\n", " ")) else "\n"
+            item["content"] = f"{content}{sep}{no_think_tag}"
+            break
+        if isinstance(content, list):
+            # OpenAI multimodal 消息格式：content 为部件数组
+            already = any(
+                isinstance(part, dict)
+                and part.get("type") in {"text", "output_text"}
+                and no_think_tag in (part.get("text") or "")
+                for part in content
+            )
+            if already:
+                break
+            content.append({"type": "text", "text": no_think_tag})
+            item["content"] = content
+            break
+    return send_messages
+
+
 # 辅助函数：获取完整的 chat/completions API URL
 def chat_completions_post_url() -> str:
     """获取 OpenAI 兼容的 chat/completions 完整 URL。"""
@@ -276,6 +348,11 @@ def call_chat_model_with_messages_raw(
     if extra_payload:
         payload.update(extra_payload)
 
+    # 关闭 Qwen3 的 thinking 模式（仅对 Qwen 家族生效）：
+    # 显著提升 tool_call 的触发率，并避免前端看到 <think>...</think> 的重复输出。
+    send_messages = _apply_disable_thinking(payload, model_name, messages)
+    payload["messages"] = send_messages
+
     # 获取 API URL
     post_url = chat_completions_post_url()
 
@@ -322,39 +399,35 @@ def call_chat_model_with_messages_raw(
 
         # 处理流式响应
         if stream:
-            text_parts: list[str] = []  # 文本部分
-            reasoning_parts: list[str] = []  # 推理部分
-            tool_calls: list[dict] = []  # 工具调用
-            chunks: list[dict] = []  # 原始响应块
+            text_parts: list[str] = []
+            reasoning_parts: list[str] = []
+            tool_calls: list[dict] = []
+            chunks: list[dict] = []
 
-            # 迭代处理响应流
+            thinking_block_active = False
+            text_block_active = False
+            tool_blocks: dict[int, dict] = {}
+
             for raw in response.iter_lines(decode_unicode=False):
                 if not raw:
                     continue
-
-                # 解码响应行
                 try:
                     line = raw.decode("utf-8").strip()
                 except UnicodeDecodeError:
-                    # 处理解码错误
                     line = raw.decode("utf-8", errors="replace").strip()
 
-                # 跳过非 data 行
                 if not line.startswith("data:"):
                     continue
 
-                # 提取数据部分
                 chunk_text = line[5:].strip()
                 if not chunk_text or chunk_text == "[DONE]":
                     if chunk_text == "[DONE]":
                         break
                     continue
 
-                # 解析 JSON
                 try:
                     data = json.loads(chunk_text)
                 except json.JSONDecodeError as exc:
-                    # 记录解析错误并跳过
                     log_stage(
                         "llm.stream.chunk_json_skip",
                         {
@@ -369,44 +442,95 @@ def call_chat_model_with_messages_raw(
                     )
                     continue
 
-                # 保存原始数据
                 chunks.append(data)
-
-                # 处理响应选择
                 choices = data.get("choices") or []
                 if not choices:
                     continue
 
-                # 提取 delta 信息
                 delta = choices[0].get("delta") or {}
-                delta_text = _coerce_delta_text(delta.get("content"))  # 文本内容
+                delta_text = _coerce_delta_text(delta.get("content"))
                 delta_reasoning = _coerce_delta_text(
                     delta.get("reasoning_content") or delta.get("reasoning") or delta.get("reasoningContent")
-                )  # 推理内容
+                )
+                delta_tool_calls = delta.get("tool_calls") or []
 
-                # 累积文本和推理内容
-                if delta_text:
-                    text_parts.append(delta_text)
                 if delta_reasoning:
-                    reasoning_parts.append(delta_reasoning)
+                    if not thinking_block_active:
+                        thinking_block_active = True
+                        if on_stream_event:
+                            on_stream_event({
+                                "type": "content_block_start",
+                                "index": 0,
+                                "content_block": {"type": "thinking"},
+                            })
+                    if on_stream_event:
+                        reasoning_parts.append(delta_reasoning)
+                        on_stream_event({
+                            "type": "content_block_delta",
+                            "index": 0,
+                            "delta": {"type": "thinking_delta", "thinking": delta_reasoning},
+                        })
 
-                # 处理工具调用
-                tool_calls = _merge_tool_call_chunks(tool_calls, delta.get("tool_calls") or [])
+                if delta_text:
+                    if thinking_block_active:
+                        thinking_block_active = False
+                        if on_stream_event:
+                            on_stream_event({"type": "content_block_stop", "index": 0})
+                    if not text_block_active:
+                        text_block_active = True
+                        if on_stream_event:
+                            on_stream_event({
+                                "type": "content_block_start",
+                                "index": 1,
+                                "content_block": {"type": "text"},
+                            })
+                    if on_stream_event:
+                        text_parts.append(delta_text)
+                        on_stream_event({
+                            "type": "content_block_delta",
+                            "index": 1,
+                            "delta": {"type": "text_delta", "text": delta_text},
+                        })
 
-                # 触发流式事件回调
-                if on_stream_event and (delta_text or delta_reasoning):
-                    on_stream_event(
-                        {
-                            "textDelta": delta_text,  # 文本增量
-                            "reasoningDelta": delta_reasoning,  # 推理增量
-                            "text": "".join(text_parts),  # 完整文本
-                            "reasoning": "".join(reasoning_parts),  # 完整推理
-                            "toolCalls": tool_calls,  # 工具调用
-                            "raw": data,  # 原始数据
+                for tc in delta_tool_calls:
+                    index = tc.get("index", 0)
+                    function = tc.get("function") or {}
+                    if index not in tool_blocks and function.get("name"):
+                        tool_blocks[index] = {
+                            "name": function.get("name"),
+                            "args": "",
+                            "id": tc.get("id"),
                         }
-                    )
+                        if on_stream_event:
+                            on_stream_event({
+                                "type": "content_block_start",
+                                "index": index,
+                                "content_block": {
+                                    "type": "tool_use",
+                                    "id": tc.get("id"),
+                                    "name": function.get("name"),
+                                },
+                            })
+                    if function.get("arguments"):
+                        if index in tool_blocks:
+                            tool_blocks[index]["args"] += function["arguments"]
+                        if on_stream_event:
+                            on_stream_event({
+                                "type": "content_block_delta",
+                                "index": index,
+                                "delta": {"type": "input_json_delta", "partial_json": function.get("arguments")},
+                            })
 
-            # 构建最终消息
+                tool_calls = _merge_tool_call_chunks(tool_calls, delta_tool_calls)
+
+            if thinking_block_active and on_stream_event:
+                on_stream_event({"type": "content_block_stop", "index": 0})
+            if text_block_active and on_stream_event:
+                on_stream_event({"type": "content_block_stop", "index": 1})
+            for idx in tool_blocks:
+                if on_stream_event:
+                    on_stream_event({"type": "content_block_stop", "index": idx})
+
             text = "".join(text_parts).strip()
             reasoning_content = "".join(reasoning_parts).strip()
             message = {
@@ -414,12 +538,9 @@ def call_chat_model_with_messages_raw(
                 "content": text,
                 "reasoning_content": reasoning_content,
             }
-
-            # 添加工具调用
             if tool_calls:
                 message["tool_calls"] = tool_calls
 
-            # 构建响应数据
             data = {"object": "chat.completion.chunk.stream", "chunks": chunks, "message": message}
         else:
             # 处理非流式响应
@@ -500,6 +621,12 @@ def call_chat_model_with_messages(
         stream=stream,
         on_stream_event=on_stream_event,
     )
+
+    # 彻底清除返回结果中的思考内容（某些 Qwen3 部署即使 disable_thinking 仍会返回 reasoning_content）
+    if response.get("message"):
+        response["message"].pop("reasoning_content", None)
+        response["message"].pop("reasoning", None)
+        response["message"].pop("reasoningContent", None)
 
     # 检查返回内容是否为空
     if not response["text"]:

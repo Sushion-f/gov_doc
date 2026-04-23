@@ -12,26 +12,14 @@
               <el-icon class="chevron"><ArrowDown /></el-icon>
             </button>
             <div class="cd-dropdown create-dropdown" :class="{ open: isCreateDropdownOpen }">
-              <div
-                v-for="option in createOptions"
-                :key="option.id"
-                class="cd-dropdown-item"
-                @click="handleCreate(option.id)"
-              >
+              <div v-for="option in createOptions" :key="option.id" class="cd-dropdown-item" @click="handleCreate(option.id)">
                 <el-icon><component :is="option.icon" /></el-icon>
                 <span>{{ option.label }}</span>
               </div>
             </div>
           </div>
 
-          <el-upload
-            ref="uploadRef"
-            :auto-upload="false"
-            :show-file-list="false"
-            :on-change="handleUploadChange"
-            multiple
-            class="cd-upload"
-          >
+          <el-upload ref="uploadRef" :auto-upload="false" :show-file-list="false" :on-change="handleUploadChange" multiple class="cd-upload">
             <button class="btn-upload" type="button">
               <el-icon><Upload /></el-icon>
               <span>上传</span>
@@ -42,14 +30,7 @@
 
       <!-- 分类 Tabs -->
       <div class="cd-tabs">
-        <button
-          v-for="tab in tabs"
-          :key="tab.id"
-          class="cd-tab"
-          :class="{ active: activeTab === tab.id }"
-          type="button"
-          @click="activeTab = tab.id"
-        >
+        <button v-for="tab in tabs" :key="tab.id" class="cd-tab" :class="{ active: activeTab === tab.id }" type="button" @click="activeTab = tab.id">
           {{ tab.label }}
         </button>
       </div>
@@ -75,13 +56,7 @@
           <div class="cd-th col-action"></div>
         </div>
         <div class="cd-tbody">
-          <div
-            v-for="item in currentFiles"
-            :key="item.id"
-            class="cd-row"
-            :class="{ 'menu-open': openActionMenuId === item.id }"
-            @click="handleRowClick(item)"
-          >
+          <div v-for="item in currentFiles" :key="item.id" class="cd-row" :class="{ 'menu-open': openActionMenuId === item.id }" @click="handleRowClick(item)">
             <div class="cd-td col-name">
               <span class="file-icon" :class="`icon-${item.type}`">
                 <el-icon v-if="item.type === 'folder'"><FolderOpened /></el-icon>
@@ -92,25 +67,9 @@
             <div class="cd-td col-owner">{{ item.owner }}</div>
             <div class="cd-td col-opened">{{ item.openedAt }}</div>
             <div class="cd-td col-action" @click.stop>
-              <button
-                class="row-action-btn"
-                type="button"
-                :aria-expanded="openActionMenuId === item.id"
-                @click.stop="toggleActionMenu(item.id, $event)"
-              >
-                ···
-              </button>
-              <div
-                class="cd-dropdown action-dropdown"
-                :class="{ open: openActionMenuId === item.id }"
-              >
-                <div
-                  v-for="action in rowActions"
-                  :key="action.id"
-                  class="cd-dropdown-item"
-                  :class="{ danger: action.danger }"
-                  @click.stop="handleRowAction(action.id, item)"
-                >
+              <button class="row-action-btn" type="button" :aria-expanded="openActionMenuId === item.id" @click.stop="toggleActionMenu(item.id, $event)">···</button>
+              <div class="cd-dropdown action-dropdown" :class="{ open: openActionMenuId === item.id }">
+                <div v-for="action in rowActions" :key="action.id" class="cd-dropdown-item" :class="{ danger: action.danger }" @click.stop="handleRowAction(action.id, item)">
                   <el-icon><component :is="action.icon" /></el-icon>
                   <span>{{ action.label }}</span>
                 </div>
@@ -128,21 +87,10 @@
         <div v-if="promptState.visible" class="cd-modal-mask" @mousedown.self="closePrompt">
           <div class="cd-modal" role="dialog" aria-modal="true">
             <div class="cd-modal-title">{{ promptState.title }}</div>
-            <input
-              ref="promptInputRef"
-              v-model="promptState.value"
-              type="text"
-              class="cd-modal-input"
-              :placeholder="promptState.placeholder"
-              :maxlength="50"
-              @keyup.enter="confirmPrompt"
-              @keyup.escape="closePrompt"
-            />
+            <input ref="promptInputRef" v-model="promptState.value" type="text" class="cd-modal-input" :placeholder="promptState.placeholder" :maxlength="50" @keyup.enter="confirmPrompt" @keyup.escape="closePrompt" />
             <div class="cd-modal-footer">
               <button class="cd-modal-btn cancel" type="button" @click="closePrompt">取消</button>
-              <button class="cd-modal-btn confirm" type="button" @click="confirmPrompt">
-                确认
-              </button>
+              <button class="cd-modal-btn confirm" type="button" @click="confirmPrompt">确认</button>
             </div>
           </div>
         </div>
@@ -152,31 +100,9 @@
 </template>
 
 <script setup lang="ts">
-import {
-  ArrowDown,
-  ArrowRight,
-  ChatDotRound,
-  Delete,
-  Document,
-  Download,
-  EditPen,
-  Filter,
-  FolderOpened,
-  Plus,
-  Rank,
-  Upload,
-} from '@element-plus/icons-vue';
+import { ArrowDown, ArrowRight, ChatDotRound, Delete, Document, Download, EditPen, Filter, FolderOpened, Plus, Rank, Upload } from '@element-plus/icons-vue';
 import { ElMessage, ElMessageBox, type UploadFile } from 'element-plus';
-import {
-  markRaw,
-  computed,
-  nextTick,
-  onMounted,
-  onUnmounted,
-  reactive,
-  ref,
-  type Component,
-} from 'vue';
+import { computed, markRaw, nextTick, onMounted, onUnmounted, reactive, ref, type Component } from 'vue';
 
 interface CloudFile {
   id: string;
@@ -209,7 +135,7 @@ const tabs = [
   { id: 'ai', label: 'AI文档' },
 ];
 
-const activeTab = ref<'recent' | 'mine' | 'ai'>('recent');
+const activeTab = ref<string>('recent');
 
 const recentFiles = ref<CloudFile[]>([
   { id: '1', name: '关于开会的通知', type: 'doc', owner: '张三', openedAt: '3月23日 16:36' },
@@ -255,11 +181,7 @@ const promptState = reactive<{
   resolve: null,
 });
 
-const openPrompt = (opts: {
-  title: string;
-  placeholder?: string;
-  initialValue?: string;
-}): Promise<string | null> => {
+const openPrompt = (opts: { title: string; placeholder?: string; initialValue?: string }): Promise<string | null> => {
   promptState.title = opts.title;
   promptState.placeholder = opts.placeholder ?? '';
   promptState.value = opts.initialValue ?? '';

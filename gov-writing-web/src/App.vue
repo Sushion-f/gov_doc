@@ -3,17 +3,12 @@
 </template>
 
 <script setup lang="ts">
+import { useUserStore } from '@/stores/user';
 import { onMounted } from 'vue';
-import { useRouter } from 'vue-router';
 
-const router = useRouter();
+const userStore = useUserStore();
 
 onMounted(() => {
-  // 检查本地存储中是否有token
-  const token = localStorage.getItem('token');
-  if (!token) {
-    // 如果没有token，重定向到登录页
-    // router.push('/login')
-  }
+  void userStore.fetchMe();
 });
 </script>

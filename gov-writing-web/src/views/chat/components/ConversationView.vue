@@ -44,22 +44,6 @@
           @steps-complete="handleStepsComplete(message)"
         />
 
-        <AnalysisOutput
-          v-if="message.analysis"
-          :analysis="message.analysis"
-          :visible="message.analysisVisible"
-          @export="handleAnalysisExport"
-        />
-
-        <HeartbeatTask
-          v-if="message.heartbeatTask"
-          :task="message.heartbeatTask"
-          :visible="message.heartbeatVisible"
-          @save="handleHeartbeatSave"
-          @cancel="handleHeartbeatCancel"
-          @update="handleHeartbeatUpdate"
-        />
-
         <div
           v-if="message.text"
           class="assistant-text-bubble"
@@ -75,9 +59,6 @@
           <button class="msg-action-btn" title="有帮助" @click="handleThumbUp(message)">
             <el-icon><Star /></el-icon>
           </button>
-          <!-- <button class="msg-action-btn" title="没帮助" @click="handleThumbDown(message)">
-            <el-icon><Star /></el-icon>
-          </button> -->
           <button class="msg-action-btn" title="重新生成" @click="handleRefresh(message)">
             <el-icon><Refresh /></el-icon>
           </button>
@@ -91,8 +72,6 @@
 import { CircleCheck, CopyDocument, Refresh, Search, Star, Upload } from '@element-plus/icons-vue';
 import { ref, watch } from 'vue';
 import AgentSteps from './AgentSteps.vue';
-import AnalysisOutput from './AnalysisOutput.vue';
-import HeartbeatTask from './HeartbeatTask.vue';
 
 const props = defineProps({
   messages: {
@@ -106,12 +85,6 @@ const props = defineProps({
 });
 
 const emit = defineEmits<{
-  'document-edit': [document: any];
-  'document-download': [document: any];
-  'analysis-export': [analysis: any];
-  'heartbeat-save': [task: any];
-  'heartbeat-cancel': [];
-  'heartbeat-update': [data: any];
   copy: [message: ChatMessage];
   'thumb-up': [message: ChatMessage];
   'thumb-down': [message: ChatMessage];
@@ -127,24 +100,8 @@ watch(
   (newMessages) => {
     localMessages.value = newMessages;
   },
-  { immediate: true, deep: true }
+  { immediate: true, deep: true },
 );
-
-const handleAnalysisExport = (analysis: any) => {
-  emit('analysis-export', analysis);
-};
-
-const handleHeartbeatSave = (task: any) => {
-  emit('heartbeat-save', task);
-};
-
-const handleHeartbeatCancel = () => {
-  emit('heartbeat-cancel');
-};
-
-const handleHeartbeatUpdate = (data: any) => {
-  emit('heartbeat-update', data);
-};
 
 const handleCopy = (message: ChatMessage) => {
   emit('copy', message);
@@ -171,14 +128,14 @@ const handleStepsComplete = (message: ChatMessage) => {
 };
 
 const getStepTitle = (message: ChatMessage) => {
-  const rawSteps = message.steps as any;
+  const rawSteps = message.steps as { title?: string; steps?: Step[] } | undefined;
   if (!rawSteps) return '';
   if (Array.isArray(rawSteps)) return '';
   return rawSteps.title || '';
 };
 
 const getStepList = (message: ChatMessage): Step[] => {
-  const rawSteps = message.steps as any;
+  const rawSteps = message.steps as { steps?: Step[] } | Step[] | undefined;
   if (!rawSteps) return [];
   if (Array.isArray(rawSteps)) return rawSteps;
   if (Array.isArray(rawSteps.steps)) return rawSteps.steps;
@@ -308,90 +265,86 @@ const isMessageStreaming = (message: ChatMessage) => message.streaming === true;
     .assistant-status {
       display: inline-flex;
       align-items: center;
-      gap: 8px;
-      padding: 8px 12px;
-      border-radius: 999px;
-      background: #f0f4f9;
-      color: #474747;
-      font-size: 12px;
-      font-weight: 500;
-      white-space: nowrap;
+      gap: 6px;
+      font-size: 13px;
+      color: #64748b;
 
       &.streaming {
-        background: #eaf3ff;
-        color: #0b57d0;
+        color: var(--primary);
       }
 
       .status-dot {
         width: 8px;
         height: 8px;
         border-radius: 50%;
-        background: #0b57d0;
+        background: var(--primary);
+        animation: pulse 1.2s ease-in-out infinite;
       }
     }
   }
 }
 
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.45;
+    transform: scale(0.92);
+  }
+}
+
 .assistant-text-bubble {
-  background: var(--surface);
-  border: 1px solid var(--outline);
-  border-radius: 4px 20px 20px 20px;
-  padding: 12px 18px;
+  margin-top: 8px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: rgba(248, 250, 252, 0.95);
+  border: 1px solid rgba(226, 232, 240, 0.9);
   font-size: 14px;
-  line-height: 1.7;
-  color: var(--on-surface);
-  max-width: 88%;
+  line-height: 1.65;
+  color: #1f2937;
 
   &.stream-hidden {
-    opacity: 0;
-    transform: translateY(8px);
-    transition:
-      opacity 0.35s ease,
-      transform 0.35s ease;
+    opacity: 0.35;
   }
 
   &.stream-visible {
     opacity: 1;
-    transform: translateY(0);
   }
 }
 
 .msg-actions {
   display: flex;
-  gap: 2px;
-  margin-top: 8px;
+  gap: 8px;
+  margin-top: 10px;
 }
 
 .msg-action-btn {
-  width: 28px;
-  height: 28px;
-  border: none;
-  background: none;
-  border-radius: 6px;
-  color: var(--on-surface-variant);
-  cursor: pointer;
-  display: flex;
+  display: inline-flex;
   align-items: center;
   justify-content: center;
-  transition: background 0.12s;
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  border: 1px solid rgba(226, 232, 240, 0.95);
+  background: rgba(255, 255, 255, 0.92);
+  color: #64748b;
+  cursor: pointer;
+  transition:
+    background 0.15s ease,
+    color 0.15s ease,
+    border-color 0.15s ease;
 
   &:hover {
-    background: var(--surface-overlay);
+    border-color: rgba(0, 47, 134, 0.18);
+    color: var(--primary);
+    background: rgba(235, 243, 254, 0.85);
   }
 
   .el-icon {
     font-size: 16px;
   }
-}
-
-/* 确保全局变量可用 */
-:root {
-  --primary: rgba(0, 47, 134, 1);
-  --on-primary: #ffffff;
-  --surface: rgba(255, 255, 255, 0.88);
-  --on-surface: #0f172a;
-  --on-surface-variant: #64748b;
-  --outline: rgba(148, 163, 184, 0.24);
-  --surface-overlay: rgba(0, 47, 134, 0.05);
 }
 </style>

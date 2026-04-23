@@ -24,10 +24,8 @@
     "vue-router": "^4.6.3"
   },
   "devDependencies": {
-    "@types/mockjs": "^1.0.10",
     "@types/node": "^25.5.2",
     "@vitejs/plugin-vue": "^6.0.1",
-    "mockjs": "^1.1.0",
     "sass": "^1.98.0",
     "vite": "^7.1.7"
   }

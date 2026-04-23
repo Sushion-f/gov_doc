@@ -136,6 +136,12 @@ class Settings:
     # 读取环境变量，不存在则为空字符串；末尾斜杠会被去除
     legacy_service_base_url = os.getenv("LEGACY_SERVICE_BASE_URL", "").rstrip("/")
 
+    # 旧系统 HTTPS 证书校验策略：
+    # - 默认 false：兼容内网自签名证书（避免 SSL CERTIFICATE_VERIFY_FAILED）
+    # - 生产建议设为 true，或配置 legacy_ca_bundle 指向 CA 证书文件
+    legacy_tls_verify = os.getenv("LEGACY_TLS_VERIFY", "false").lower() == "true"
+    legacy_ca_bundle = os.getenv("LEGACY_CA_BUNDLE", "").strip()
+
     # 旧系统的根路径（用于前端路由跳转）
     legacy_system_url = os.getenv("LEGACY_SYSTEM_URL", "/areport")
 
@@ -176,11 +182,35 @@ class Settings:
     # Planner 生成的最大执行步骤数（防止步骤过多导致执行时间过长），默认 5
     planner_max_steps = _llm_int("planner_max_steps", 5)
 
+    # 检测到「公文写作类」用户输入时，Planner 是否强制至少产生一次 tool call（OpenAI 兼容字段 tool_choice: required）。
+    # 可显著减少「只输出自然语言、不下发 dispatch_sub_agent」的情况；若网关不支持 required 会自动回退为 auto。
+    planner_force_tool_for_writing = _llm_bool("planner_force_tool_for_writing", True)
+
+    # 是否关闭 Qwen3 等模型的 thinking 模式。
+    # 开启 thinking 时模型会先产出 <think>...</think>，既降低 tool_call 命中率、
+    # 也让前端看到重复的思考文案。默认关闭思考。
+    # 仅对 Qwen 系模型生效（Qwen3 / Qwen3.5 等）。
+    llm_disable_thinking = _llm_bool("disable_thinking", True)
+
+    # 是否在请求体顶层携带 chat_template_kwargs={"enable_thinking": false}。
+    # 该字段仅部分网关（官方 Qwen3 chat template / 较新的 vLLM）识别；
+    # 很多私有化部署会因"未知字段"直接返回 400，触发 planner LLMCallError 回退。
+    # 默认 False —— 优先依赖安全的 /no_think 文本 hint。确认网关支持后可打开。
+    llm_send_chat_template_kwargs = _llm_bool("send_chat_template_kwargs", False)
+
     # 可用模型列表（用于前端下拉选择）
     llm_available_models = _parse_available_models()
 
     # 是否开启运行时详细日志（用于调试 Agent 执行过程）
     debug_runtime_logs = os.getenv("NEW_APP_DEBUG_RUNTIME_LOGS", "true").lower() == "true"
+
+    # 是否在持久化 SSE 事件前做瘦身（只保留前端渲染所需字段，剔除 taskPacket/registry/raw 等重字段）
+    # 完整数据仍保留在 V4ConversationRun.input_payload_json 与 V4ConversationMessage.meta_json，便于回放与调试
+    # 可通过环境变量关闭以便排障
+    slim_event_payload = os.getenv("NEW_APP_SLIM_EVENT_PAYLOAD", "true").lower() == "true"
+
+    # 是否在失败事件中携带 traceback（仅 debug 场景使用）
+    include_error_traceback = os.getenv("NEW_APP_INCLUDE_ERROR_TRACEBACK", "false").lower() == "true"
 
     # 运行时日志的最大字符数（单条日志超过此长度会被截断）
     debug_log_max_chars = int(os.getenv("NEW_APP_DEBUG_LOG_MAX_CHARS", "40000"))

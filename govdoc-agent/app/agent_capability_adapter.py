@@ -16,6 +16,7 @@ from agents import (
 from .config import settings
 from .debug_log import log_stage, mask_cookie
 from .llm import LLMCallError, call_chat_model, resolve_model_name, text_to_html
+from .text_postprocess import clean_document_text, clean_general_text
 
 
 @dataclass
@@ -51,6 +52,17 @@ def resolve_skill(content: str, requested_skill: str | None = None) -> str:
 
 def _legacy_base_url() -> str:
     return settings.legacy_service_base_url or settings.legacy_auth_base_url
+
+
+def _legacy_verify() -> bool | str:
+    """legacy HTTPS 校验策略。
+
+    - 配置了 legacy_ca_bundle 时返回证书路径（requests 将使用该 CA 校验）
+    - 否则按 legacy_tls_verify 布尔开关决定是否校验
+    """
+    if settings.legacy_ca_bundle:
+        return settings.legacy_ca_bundle
+    return bool(settings.legacy_tls_verify)
 
 
 def _read_sse_text(response: requests.Response) -> str:
@@ -104,6 +116,7 @@ def _try_legacy_json(path: str, payload: dict, cookies: str | None = None) -> Le
             json=payload,
             headers={"Cookie": cookies or ""},
             timeout=20,
+            verify=_legacy_verify(),
         )
         response.raise_for_status()
         data = response.json()
@@ -163,6 +176,7 @@ def _try_legacy_stream(path: str, payload: dict, cookies: str | None = None) -> 
             headers={"Cookie": cookies or ""},
             timeout=40,
             stream=True,
+            verify=_legacy_verify(),
         )
         response.raise_for_status()
         text = _read_sse_text(response)
@@ -208,13 +222,13 @@ def _invoke_llm(
     def _stream_handler(ev: dict[str, Any]) -> None:
         if not on_text_delta:
             return
-        full = ev.get("text")
-        if not isinstance(full, str):
-            full = ""
-        delta = ev.get("textDelta")
-        if not isinstance(delta, str):
-            delta = ""
-        on_text_delta(full, delta)
+        if ev.get("type") == "content_block_delta" and ev.get("delta", {}).get("type") == "text_delta":
+            delta_text = ev["delta"].get("text", "")
+            if delta_text:
+                _stream_handler._accumulated = getattr(_stream_handler, "_accumulated", "") + delta_text
+                on_text_delta(_stream_handler._accumulated, delta_text)
+        elif ev.get("type") == "content_block_stop":
+            _stream_handler._accumulated = ""
 
     try:
         response = call_chat_model(
@@ -329,6 +343,9 @@ def _execute_skill_once(
             task_packet,
             on_text_delta=on_text_delta,
         )
+        # 通用回复：剥离"好的，我可以帮您…"等寒暄前缀与末尾客套，保留自然格式。
+        if source_state == "model_success":
+            text = clean_general_text(text)
         result = SkillExecutionResult(
             {"text": text, "source": _normalized_source(source_state)},
             [{"type": "general", "title": "通用回答", "html": text_to_html(text)}],
@@ -354,12 +371,26 @@ def _execute_skill_once(
             {"query": prompt, "text": prompt, "keyword": prompt},
             cookies,
         )
+        legacy_items: list[Any] = []
         if legacy.ok:
             body = legacy.payload if isinstance(legacy.payload, dict) else {}
-            items = body.get("data") or body.get("rows") or body.get("list") or []
-            normalized = {"items": items, "source": _normalized_source("legacy_success")}
+            raw_items = body.get("data") or body.get("rows") or body.get("list") or []
+            if isinstance(raw_items, list):
+                legacy_items = raw_items
+            elif raw_items is not None:
+                legacy_items = [raw_items]
+
+        # Legacy 返回 200 但 data/rows/list 为空时，若直接结束会导致 items 与 summary_text 皆空，
+        # runtime 会触发「检索没有拿到有效结果」的 waiting_user，后续 writing 步骤永远不会执行。
+        # 与接口失败同等处理：走 LLM 兜底，至少产出 summary_text 供 handoff 与写作使用。
+        if legacy.ok and legacy_items:
+            normalized = {"items": legacy_items, "source": _normalized_source("legacy_success")}
             render_blocks = [
-                {"type": "summary", "title": "检索结果", "html": text_to_html(json.dumps(items[:5], ensure_ascii=False))}
+                {
+                    "type": "summary",
+                    "title": "检索结果",
+                    "html": text_to_html(json.dumps(legacy_items[:5], ensure_ascii=False)),
+                }
             ]
             result = SkillExecutionResult(
                 normalized,
@@ -378,6 +409,19 @@ def _execute_skill_once(
             )
             return result
 
+        if legacy.ok and not legacy_items:
+            log_stage(
+                "skill.retrieval.legacy_empty_fallback_llm",
+                {
+                    "path": "/report-agent/v1/document-material-retrieval",
+                    "legacyUrl": legacy.url,
+                    "reason": "legacy_http_ok_but_no_items",
+                },
+                enabled=settings.debug_runtime_logs,
+                max_chars=settings.debug_log_max_chars,
+                max_string_chars=settings.debug_log_max_string_chars,
+            )
+
         text, fallback_state, fallback_error, reasoning_content = _invoke_llm(
             prompt,
             skill_name,
@@ -391,8 +435,13 @@ def _execute_skill_once(
             {"title": "检索摘要", "summary": line}
             for line in [part.strip("- ").strip() for part in text.splitlines() if part.strip()][:5]
         ]
+        # 同步保留整段 LLM 兜底输出，供 build_handoff_content 作为完整背景资料下传给 writing 步骤。
         result = SkillExecutionResult(
-            {"items": items, "source": _normalized_source(fallback_state)},
+            {
+                "items": items,
+                "source": _normalized_source(fallback_state),
+                "summary_text": text,
+            },
             [{"type": "summary", "title": "检索结果", "html": text_to_html(text)}],
             [],
             [],
@@ -431,6 +480,10 @@ def _execute_skill_once(
                 task_packet,
                 on_text_delta=on_text_delta,
             )
+        # 公文正文强制纯文本：抽取 <正文>...</正文>、剥离 Markdown、去除寒暄与末尾客套。
+        # 即使模型违规输出 Markdown，前端最终看到的也是可直接粘贴到 Word 的纯文本。
+        if source_state in ("model_success", "legacy_success") and text:
+            text = clean_document_text(text)
         result = SkillExecutionResult(
             {"document": text, "source": _normalized_source(source_state)},
             [{"type": "document", "title": "公文写作结果", "html": text_to_html(text)}],

@@ -1,0 +1,142 @@
+data: {"type": "message_start", "seqNo": 1, "createdAt": "2026-04-22T09:02:01", "payload": {"phase": "prepared", "runId": "91753e30-daf8-443c-9671-48252bcd8411", "taskId": "task_e3005d21_0001", "requestedSkill": ""}}
+
+data: {"type": "content_block_stop", "seqNo": 2, "createdAt": "2026-04-22T09:02:13"}
+
+data: {"type": "content_block_start", "seqNo": 3, "createdAt": "2026-04-22T09:02:13", "index": 1, "content_block": {"type": "text", "purpose": "plan_summary", "displayText": "规划完成"}}
+
+data: {"type": "content_block_delta", "seqNo": 4, "createdAt": "2026-04-22T09:02:13", "index": 1, "delta": {"type": "text_delta", "text": "已完成执行计划生成与校验。"}}
+
+data: {"type": "content_block_stop", "seqNo": 5, "createdAt": "2026-04-22T09:02:13", "index": 1}
+
+data: {"type": "tool_result", "seqNo": 6, "createdAt": "2026-04-22T09:02:13", "payload": {"tool": "a2a_planning", "displayText": "已规划 1 个执行步骤", "steps": 1, "plan": {"intent": "general_chat", "summary": "planner 不可用时，默认由主 Agent 直接回应用户，并在必要时提示后续可调用的 sub agent。", "requiresUserInput": false, "clarificationQuestion": null, "steps": [{"index": 1, "skillName": "general", "title": "主 Agent 对话", "objective": "主 Agent 直接回应用户问题，必要时说明下一步建议调用的 sub agent。", "dependsOn": [], "subtaskRole": "main_agent"}]}, "plannerMeta": {"planner": "main_agent_fallback", "fallback": true, "dispatchMode": "main_agent_direct"}}}
+
+data: {"type": "content_block_start", "seqNo": 7, "createdAt": "2026-04-22T09:02:14", "index": 110, "content_block": {"type": "tool_use", "name": "main_agent", "skillName": "general", "stepIndex": 1, "stepTitle": "主 Agent 对话", "displayText": "正在处理 主 Agent 对话"}}
+
+data: {"type": "content_block_delta", "seqNo": 8, "createdAt": "2026-04-22T09:02:14", "index": 110, "delta": {"type": "input_json_delta", "partial_json": "{\"subtask\": \"task_e3005d21_0003\", \"skill\": \"general\", \"depends_on\": [], \"objective\": \"主 Agent 直接回应用户问题，必要时说明下一步建议调用的 sub agent。\"}"}}
+
+data: {"type": "content_block_stop", "seqNo": 9, "createdAt": "2026-04-22T09:02:14", "index": 110}
+
+data: {"type": "running", "seqNo": 10, "createdAt": "2026-04-22T09:02:14", "payload": {"taskId": "task_e3005d21_0003", "parentTaskId": "task_e3005d21_0002", "skillName": "general", "stepIndex": 1, "stepTitle": "主 Agent 对话", "displayText": "正在处理 主 Agent 对话"}}
+
+data: {"type": "content_block_start", "seqNo": 11, "createdAt": "2026-04-22T09:02:14", "index": 111, "content_block": {"type": "text", "purpose": "assistant_reply", "stepIndex": 1, "stepTitle": "主 Agent 对话", "skillName": "general"}}
+
+data: {"type": "content_block_delta", "seqNo": 12, "createdAt": "2026-04-22T09:02:14", "index": 111, "delta": {"type": "text_delta", "text": "好的，"}}
+
+data: {"type": "content_block_delta", "seqNo": 13, "createdAt": "2026-04-22T09:02:14", "index": 111, "delta": {"type": "text_delta", "text": "我可以帮您"}}
+
+data: {"type": "content_block_delta", "seqNo": 14, "createdAt": "2026-04-22T09:02:15", "index": 111, "delta": {"type": "text_delta", "text": "生成一篇五一"}}
+
+data: {"type": "content_block_delta", "seqNo": 15, "createdAt": "2026-04-22T09:02:15", "index": 111, "delta": {"type": "text_delta", "text": "放假的通知。"}}
+
+data: {"type": "content_block_delta", "seqNo": 16, "createdAt": "2026-04-22T09:02:16", "index": 111, "delta": {"type": "text_delta", "text": "以下是通知的"}}
+
+data: {"type": "content_block_delta", "seqNo": 17, "createdAt": "2026-04-22T09:02:16", "index": 111, "delta": {"type": "text_delta", "text": "范文：\n\n---\n\n"}}
+
+data: {"type": "content_block_delta", "seqNo": 18, "createdAt": "2026-04-22T09:02:17", "index": 111, "delta": {"type": "text_delta", "text": "**关于五一"}}
+
+data: {"type": "content_block_delta", "seqNo": 19, "createdAt": "2026-04-22T09:02:17", "index": 111, "delta": {"type": "text_delta", "text": "放假安排的通知**\n\n"}}
+
+data: {"type": "content_block_delta", "seqNo": 20, "createdAt": "2026-04-22T09:02:18", "index": 111, "delta": {"type": "text_delta", "text": "全体员工：\n\n根据国家"}}
+
+data: {"type": "content_block_delta", "seqNo": 21, "createdAt": "2026-04-22T09:02:18", "index": 111, "delta": {"type": "text_delta", "text": "法定节假日安排，并"}}
+
+data: {"type": "content_block_delta", "seqNo": 22, "createdAt": "2026-04-22T09:02:19", "index": 111, "delta": {"type": "text_delta", "text": "结合我单位实际情况"}}
+
+data: {"type": "content_block_delta", "seqNo": 23, "createdAt": "2026-04-22T09:02:19", "index": 111, "delta": {"type": "text_delta", "text": "，现将2"}}
+
+data: {"type": "content_block_delta", "seqNo": 24, "createdAt": "2026-04-22T09:02:20", "index": 111, "delta": {"type": "text_delta", "text": "025年"}}
+
+data: {"type": "content_block_delta", "seqNo": 25, "createdAt": "2026-04-22T09:02:20", "index": 111, "delta": {"type": "text_delta", "text": "五一劳动节放假"}}
+
+data: {"type": "content_block_delta", "seqNo": 26, "createdAt": "2026-04-22T09:02:21", "index": 111, "delta": {"type": "text_delta", "text": "安排通知如下：\n\n"}}
+
+data: {"type": "content_block_delta", "seqNo": 27, "createdAt": "2026-04-22T09:02:21", "index": 111, "delta": {"type": "text_delta", "text": "一、放假时间"}}
+
+data: {"type": "content_block_delta", "seqNo": 28, "createdAt": "2026-04-22T09:02:22", "index": 111, "delta": {"type": "text_delta", "text": "  \n202"}}
+
+data: {"type": "content_block_delta", "seqNo": 29, "createdAt": "2026-04-22T09:02:22", "index": 111, "delta": {"type": "text_delta", "text": "5年5月"}}
+
+data: {"type": "content_block_delta", "seqNo": 30, "createdAt": "2026-04-22T09:02:23", "index": 111, "delta": {"type": "text_delta", "text": "1日（星期"}}
+
+data: {"type": "content_block_delta", "seqNo": 31, "createdAt": "2026-04-22T09:02:23", "index": 111, "delta": {"type": "text_delta", "text": "四）至5"}}
+
+data: {"type": "content_block_delta", "seqNo": 32, "createdAt": "2026-04-22T09:02:24", "index": 111, "delta": {"type": "text_delta", "text": "月5日（"}}
+
+data: {"type": "content_block_delta", "seqNo": 33, "createdAt": "2026-04-22T09:02:24", "index": 111, "delta": {"type": "text_delta", "text": "星期一）放假"}}
+
+data: {"type": "content_block_delta", "seqNo": 34, "createdAt": "2026-04-22T09:02:25", "index": 111, "delta": {"type": "text_delta", "text": "调休，共"}}
+
+data: {"type": "content_block_delta", "seqNo": 35, "createdAt": "2026-04-22T09:02:25", "index": 111, "delta": {"type": "text_delta", "text": "5天。4"}}
+
+data: {"type": "content_block_delta", "seqNo": 36, "createdAt": "2026-04-22T09:02:26", "index": 111, "delta": {"type": "text_delta", "text": "月27日"}}
+
+data: {"type": "content_block_delta", "seqNo": 37, "createdAt": "2026-04-22T09:02:26", "index": 111, "delta": {"type": "text_delta", "text": "（星期日"}}
+
+data: {"type": "content_block_delta", "seqNo": 38, "createdAt": "2026-04-22T09:02:26", "index": 111, "delta": {"type": "text_delta", "text": "）、5月"}}
+
+data: {"type": "content_block_delta", "seqNo": 39, "createdAt": "2026-04-22T09:02:27", "index": 111, "delta": {"type": "text_delta", "text": "11日"}}
+
+data: {"type": "content_block_delta", "seqNo": 40, "createdAt": "2026-04-22T09:02:27", "index": 111, "delta": {"type": "text_delta", "text": "（星期六"}}
+
+data: {"type": "content_block_delta", "seqNo": 41, "createdAt": "2026-04-22T09:02:28", "index": 111, "delta": {"type": "text_delta", "text": "）上班。\n\n"}}
+
+data: {"type": "content_block_delta", "seqNo": 42, "createdAt": "2026-04-22T09:02:28", "index": 111, "delta": {"type": "text_delta", "text": "二、注意事项"}}
+
+data: {"type": "content_block_delta", "seqNo": 43, "createdAt": "2026-04-22T09:02:29", "index": 111, "delta": {"type": "text_delta", "text": "  \n1."}}
+
+data: {"type": "content_block_delta", "seqNo": 44, "createdAt": "2026-04-22T09:02:29", "index": 111, "delta": {"type": "text_delta", "text": " 各部门"}}
+
+data: {"type": "content_block_delta", "seqNo": 45, "createdAt": "2026-04-22T09:02:29", "index": 111, "delta": {"type": "text_delta", "text": "要妥善安排"}}
+
+data: {"type": "content_block_delta", "seqNo": 46, "createdAt": "2026-04-22T09:02:30", "index": 111, "delta": {"type": "text_delta", "text": "好节前工作"}}
+
+data: {"type": "content_block_delta", "seqNo": 47, "createdAt": "2026-04-22T09:02:30", "index": 111, "delta": {"type": "text_delta", "text": "，确保节日期"}}
+
+data: {"type": "content_block_delta", "seqNo": 48, "createdAt": "2026-04-22T09:02:31", "index": 111, "delta": {"type": "text_delta", "text": "间各项工作正常进行"}}
+
+data: {"type": "content_block_delta", "seqNo": 49, "createdAt": "2026-04-22T09:02:31", "index": 111, "delta": {"type": "text_delta", "text": "。  \n2."}}
+
+data: {"type": "content_block_delta", "seqNo": 50, "createdAt": "2026-04-22T09:02:32", "index": 111, "delta": {"type": "text_delta", "text": " 放假期间"}}
+
+data: {"type": "content_block_delta", "seqNo": 51, "createdAt": "2026-04-22T09:02:32", "index": 111, "delta": {"type": "text_delta", "text": "，请大家保持通讯"}}
+
+data: {"type": "content_block_delta", "seqNo": 52, "createdAt": "2026-04-22T09:02:33", "index": 111, "delta": {"type": "text_delta", "text": "畅通，注意安全"}}
+
+data: {"type": "content_block_delta", "seqNo": 53, "createdAt": "2026-04-22T09:02:33", "index": 111, "delta": {"type": "text_delta", "text": "，合理安排假期"}}
+
+data: {"type": "content_block_delta", "seqNo": 54, "createdAt": "2026-04-22T09:02:34", "index": 111, "delta": {"type": "text_delta", "text": "生活。  \n3"}}
+
+data: {"type": "content_block_delta", "seqNo": 55, "createdAt": "2026-04-22T09:02:34", "index": 111, "delta": {"type": "text_delta", "text": ". 如有加班"}}
+
+data: {"type": "content_block_delta", "seqNo": 56, "createdAt": "2026-04-22T09:02:35", "index": 111, "delta": {"type": "text_delta", "text": "需求，请各部门提前"}}
+
+data: {"type": "content_block_delta", "seqNo": 57, "createdAt": "2026-04-22T09:02:35", "index": 111, "delta": {"type": "text_delta", "text": "报备，并"}}
+
+data: {"type": "content_block_delta", "seqNo": 58, "createdAt": "2026-04-22T09:02:36", "index": 111, "delta": {"type": "text_delta", "text": "做好相关安排"}}
+
+data: {"type": "content_block_delta", "seqNo": 59, "createdAt": "2026-04-22T09:02:36", "index": 111, "delta": {"type": "text_delta", "text": "。\n\n祝大家"}}
+
+data: {"type": "content_block_delta", "seqNo": 60, "createdAt": "2026-04-22T09:02:37", "index": 111, "delta": {"type": "text_delta", "text": "节日愉快！\n\n特"}}
+
+data: {"type": "content_block_delta", "seqNo": 61, "createdAt": "2026-04-22T09:02:37", "index": 111, "delta": {"type": "text_delta", "text": "此通知。\n\n**"}}
+
+data: {"type": "content_block_delta", "seqNo": 62, "createdAt": "2026-04-22T09:02:38", "index": 111, "delta": {"type": "text_delta", "text": "党组秘书处**"}}
+
+data: {"type": "content_block_delta", "seqNo": 63, "createdAt": "2026-04-22T09:02:38", "index": 111, "delta": {"type": "text_delta", "text": "  \n202"}}
+
+data: {"type": "content_block_delta", "seqNo": 64, "createdAt": "2026-04-22T09:02:39", "index": 111, "delta": {"type": "text_delta", "text": "5年4月"}}
+
+data: {"type": "content_block_delta", "seqNo": 65, "createdAt": "2026-04-22T09:02:39", "index": 111, "delta": {"type": "text_delta", "text": "5日\n\n---\n\n"}}
+
+data: {"type": "content_block_delta", "seqNo": 66, "createdAt": "2026-04-22T09:02:40", "index": 111, "delta": {"type": "text_delta", "text": "如果您有其他具体"}}
+
+data: {"type": "content_block_delta", "seqNo": 67, "createdAt": "2026-04-22T09:02:40", "index": 111, "delta": {"type": "text_delta", "text": "要求或需要进一步"}}
+
+data: {"type": "content_block_delta", "seqNo": 68, "createdAt": "2026-04-22T09:02:41", "index": 111, "delta": {"type": "text_delta", "text": "修改，请告诉我！"}}
+
+data: {"type": "content_block_stop", "seqNo": 69, "createdAt": "2026-04-22T09:02:41", "index": 111}
+
+data: {"type": "tool_result", "seqNo": 70, "createdAt": "2026-04-22T09:02:41", "payload": {"tool": "main_agent", "taskId": "task_e3005d21_0003", "skillName": "general", "stepIndex": 1, "stepTitle": "主 Agent 对话", "displayText": "处理完成 · 主 Agent 对话", "retryable": false, "sourceState": "model_success", "errorDetail": null, "normalizedResult": {"source": "model_success", "text": "好的，我可以帮您生成一篇五一放假的通知。以下是通知的范文：\n\n---\n\n**关于五一放假安排的通知**\n\n全体员工：\n\n根据国家法定节假日安排，并结合我单位实际情况，现将2025年五一劳动节放假安排通知如下：\n\n一、放假时间  \n2025年5月1日（星期四）至5月5日（星期一）放假调休，共5天。4月27日（星期日）、5月11日（星期六）上班。\n\n二、注意事项  \n1. 各部门要妥善安排好节前工作，确保节日期间各项工作正常进行。  \n2. 放假期间，请大家保持通讯畅通，注意安全，合理安排假期生活。  \n3. 如有加班需求，请各部门提前报备，并做好相关安排。\n\n祝大家节日愉快！\n\n特此通知。\n\n**党组秘书处**  \n2025年4月5日\n\n---\n\n如果您有其他具体要求或需要进一步修改，请告诉我！"}}}
+
+data: [DONE]
+

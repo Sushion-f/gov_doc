@@ -58,10 +58,10 @@
         <span>切换至旧版本</span>
       </button>
       <div class="user-info">
-        <div class="user-avatar">{{ userInfo.avatar }}</div>
+        <div class="user-avatar">{{ userStore.avatarChar }}</div>
         <div class="user-meta">
-          <div class="user-name">{{ userInfo.name }}</div>
-          <div class="user-desc">{{ userInfo.role }} · 常用模型 {{ userInfo.model }}</div>
+          <div class="user-name">{{ userStore.displayName }}</div>
+          <div class="user-desc">常用模型 {{ userStore.defaultModelLabel }}</div>
         </div>
       </div>
     </div>
@@ -83,11 +83,13 @@
 </template>
 
 <script setup lang="ts">
-import { createNewChat, deleteChat, getChatList, pinChat, renameChat } from '@/api';
-import { ChatSession } from '@/types';
+import { deleteConversation, listConversations, updateConversation } from '@/api';
+import { useUserStore } from '@/stores/user';
 import { ChatDotRound, Cloudy, EditPen, Loading, Switch, Top } from '@element-plus/icons-vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import { onMounted, onUnmounted, ref, watch } from 'vue';
+
+const userStore = useUserStore();
 
 const props = defineProps({
   currentSessionId: {
@@ -103,13 +105,6 @@ const emit = defineEmits([
   'open-cloud-disk',
   'switch-version',
 ]);
-
-const userInfo = ref({
-  avatar: '李',
-  name: '李文静',
-  role: '党组秘书',
-  model: 'Minimax',
-});
 
 const handleCloudDisk = () => {
   emit('open-cloud-disk');
@@ -128,18 +123,37 @@ const renameItem = ref<ChatSession | null>(null);
 const renameLoading = ref(false);
 const sidebarRootRef = ref<HTMLElement | null>(null);
 const suppressOutsideCloseOnce = ref(false);
+const draftPrefix = 'local-';
+
+const createLocalDraft = (): ChatSession => {
+  const now = new Date().toISOString();
+  return {
+    id: `${draftPrefix}${Date.now()}`,
+    title: '新对话',
+    pinned: false,
+    isNew: true,
+    createdAt: now,
+    updatedAt: now,
+  };
+};
 
 const loadHistory = async () => {
   loading.value = true;
   try {
-    const res = await getChatList({ pageSize: 50 });
-    const list = res.data.list || [];
-    list.sort((a: any, b: any) => {
+    const draftItems = historyItems.value.filter((item) => item.isNew);
+    const list = (await listConversations()).map((item) => ({
+      id: item.id,
+      title: item.title,
+      pinned: item.pinned,
+      updatedAt: item.updatedAt,
+      createdAt: item.updatedAt,
+    }));
+    list.sort((a, b) => {
       if (a.pinned && !b.pinned) return -1;
       if (!a.pinned && b.pinned) return 1;
       return 0;
     });
-    historyItems.value = list;
+    historyItems.value = [...draftItems, ...list];
   } catch (error) {
     console.error('加载历史会话失败:', error);
     ElMessage.error('加载历史会话失败');
@@ -149,18 +163,13 @@ const loadHistory = async () => {
 };
 
 const handleNewChat = async () => {
-  try {
-    if (historyItems.value.some((v) => v.isNew)) {
-      ElMessage.warning('已存在新会话');
-      return;
-    }
-    const res = await createNewChat();
-    historyItems.value.unshift(res.data);
-    emit('new-chat', res.data);
-  } catch (error) {
-    console.error('创建新会话失败:', error);
-    ElMessage.error('创建新会话失败');
+  if (historyItems.value.some((v) => v.isNew)) {
+    ElMessage.warning('已存在新会话');
+    return;
   }
+  const draft = createLocalDraft();
+  historyItems.value.unshift(draft);
+  emit('new-chat', draft);
 };
 
 const handleSelectSession = (sessionId: string) => {
@@ -198,7 +207,9 @@ const confirmRename = async () => {
   renameLoading.value = true;
   try {
     if (renameItem.value) {
-      await renameChat(renameItem.value.id, renameTitle.value.trim());
+      if (!renameItem.value.isNew) {
+        await updateConversation(renameItem.value.id, { title: renameTitle.value.trim() });
+      }
       const item = historyItems.value.find((i) => i.id === renameItem.value?.id);
       if (item) {
         item.title = renameTitle.value.trim();
@@ -215,8 +226,12 @@ const confirmRename = async () => {
 };
 
 const handlePin = async (item: ChatSession) => {
+  if (item.isNew) {
+    ElMessage.warning('新会话不支持置顶');
+    return;
+  }
   try {
-    await pinChat(item.id, !item.pinned);
+    await updateConversation(item.id, { pinned: !item.pinned });
     item.pinned = !item.pinned;
     historyItems.value.sort((a, b) => {
       if (a.pinned && !b.pinned) return -1;
@@ -238,7 +253,9 @@ const handleDelete = async (item: ChatSession) => {
       cancelButtonText: '取消',
       type: 'warning',
     });
-    await deleteChat(item.id);
+    if (!item.isNew) {
+      await deleteConversation(item.id);
+    }
     const index = historyItems.value.findIndex((i) => i.id === item.id);
     if (index > -1) {
       historyItems.value.splice(index, 1);
@@ -248,9 +265,9 @@ const handleDelete = async (item: ChatSession) => {
       if (draft) {
         emit('new-chat', draft);
       } else {
-        const created = await createNewChat();
-        historyItems.value.unshift(created.data);
-        emit('new-chat', created.data);
+        const created = createLocalDraft();
+        historyItems.value.unshift(created);
+        emit('new-chat', created);
       }
     } else {
       emit('session-deleted', item.id);
@@ -270,6 +287,14 @@ const addSession = (session: ChatSession) => {
   if (!exists) {
     historyItems.value.unshift(session);
   }
+};
+
+const replaceSessionId = (fromId: string, toId: string, title?: string) => {
+  const item = historyItems.value.find((i) => i.id === fromId);
+  if (!item) return;
+  item.id = toId;
+  item.isNew = false;
+  if (title) item.title = title;
 };
 
 const updateSessionTitle = (sessionId: string, title: string) => {
@@ -311,6 +336,7 @@ onUnmounted(() => {
 
 defineExpose({
   addSession,
+  replaceSessionId,
   updateSessionTitle,
   loadHistory,
 });

@@ -54,27 +54,27 @@ class TaskPacket(BaseModel):
 
 class TaskEvent(BaseModel):
     """任务事件模型（用于 SSE 事件流）。"""
-    id: str  # 事件 ID
-    run_id: str  # 运行 ID
-    task_id: str  # 任务 ID
-    parent_task_id: str | None = None  # 父任务 ID
-    seq_no: int  # 事件序号
+    id: str
+    run_id: str
+    task_id: str
+    parent_task_id: str | None = None
+    seq_no: int
     event_type: Literal[
-        "created",
-        "running",
-        "tool_call",
+        "message_start",
+        "message_delta",
+        "message_stop",
+        "content_block_start",
+        "content_block_delta",
+        "content_block_stop",
+        "tool_result",
         "waiting_user",
-        "completed",
-        "failed",
-    ]  # 事件类型
-    status: str  # 状态
-    title: str  # 事件标题
-    detail: str | None = None  # 事件详情
-    detail_html: str | None = None  # 详情 HTML 格式
-    payload: dict[str, Any] = Field(default_factory=dict)  # 负载
-    prompt_menu: dict[str, Any] = Field(default_factory=dict)  # 提示菜单
-    error_detail: str | None = None  # 错误详情
-    created_at: datetime  # 创建时间
+        "error",
+    ]
+    event_index: int = 0
+    delta: dict[str, Any] | None = None
+    content_block: dict[str, Any] | None = None
+    payload: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
 
 
 class WorkspaceArtifactRef(BaseModel):
@@ -136,6 +136,7 @@ class ConversationRenameRequest(BaseModel):
 class ConversationRunRequest(BaseModel):
     """运行对话请求模型。"""
     content: str  # 消息内容
+    title: str | None = None  # 会话标题（仅在新建会话时有效）
     model: str | None = None  # 模型名称
     skill: str | None = None  # 技能名称
     attachments: list[dict[str, Any]] = Field(default_factory=list)  # 附件列表

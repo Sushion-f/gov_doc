@@ -80,20 +80,19 @@ class V4TaskEvent(Base):
     """任务事件表。用于 SSE 事件流推送，实时通知前端任务状态变化。"""
     __tablename__ = "v4_task_event"
 
-    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=uuid_str)  # 事件 ID（主键）
-    run_id: Mapped[str] = mapped_column(String(64), index=True)  # 所属运行 ID
-    conversation_id: Mapped[str] = mapped_column(String(64), index=True)  # 所属会话 ID
-    user_id: Mapped[str] = mapped_column(String(255), index=True)  # 用户 ID
-    task_id: Mapped[str] = mapped_column(String(64), index=True)  # 任务 ID
-    parent_task_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)  # 父任务 ID
-    seq_no: Mapped[int] = mapped_column(Integer)  # 事件序号（递增，用于排序）
-    event_type: Mapped[str] = mapped_column(String(64))  # 事件类型：created/running/tool_call/waiting_user/completed/failed
-    status: Mapped[str] = mapped_column(String(32))  # 状态
-    title: Mapped[str] = mapped_column(String(255))  # 事件标题
-    detail: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # 事件详情
-    detail_html: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # 详情 HTML 格式
-    payload_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # 负载 JSON
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)  # 创建时间
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=uuid_str)
+    run_id: Mapped[str] = mapped_column(String(64), index=True)
+    conversation_id: Mapped[str] = mapped_column(String(64), index=True)
+    user_id: Mapped[str] = mapped_column(String(255), index=True)
+    task_id: Mapped[str] = mapped_column(String(64), index=True)
+    parent_task_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    seq_no: Mapped[int] = mapped_column(Integer)
+    event_type: Mapped[str] = mapped_column(String(64))
+    event_index: Mapped[int] = mapped_column(Integer, default=0)
+    delta_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    block_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    payload_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
 class V4ConversationArtifact(Base):

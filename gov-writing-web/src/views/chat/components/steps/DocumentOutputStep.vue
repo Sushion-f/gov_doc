@@ -3,30 +3,16 @@
     <div class="doc-card-header">
       <div class="doc-card-header-main">
         <div class="doc-badge">
-          <span class="doc-badge-icon" aria-hidden="true"
-            ><el-icon><Document /></el-icon
-          ></span>
+          <span class="doc-badge-icon" aria-hidden="true">
+            <el-icon><Document /></el-icon>
+          </span>
           <span>文档输出</span>
         </div>
         <h2 class="doc-card-title" v-html="step.label || '生成文档'"></h2>
       </div>
-      <!-- <div class="doc-card-actions">
-        <button type="button" class="doc-action-btn" title="联动编辑" @click="onLinkedEdit">
-          <el-icon><EditPen /></el-icon>
-          联动编辑
-        </button>
-        <button type="button" class="doc-action-btn" title="查看结果" @click="onViewResult">
-          <el-icon><View /></el-icon>
-          查看结果
-        </button>
-      </div> -->
     </div>
 
-    <!-- <p v-if="summaryText" class="doc-card-summary">{{ summaryText }}</p> -->
-
-    <div class="doc-preview-panel">
-      <TinymceDocEditor v-model="editorBody" compact auto-grow :readonly="leftEditorReadonly" />
-    </div>
+    <div class="doc-preview-panel" v-html="editorBody"></div>
 
     <div class="doc-card-footer">
       <span class="doc-footer-hint"></span>
@@ -39,10 +25,9 @@
 </template>
 
 <script setup lang="ts">
-import { ArrowRight, Document, EditPen, View } from '@element-plus/icons-vue';
+import { ArrowRight, Document } from '@element-plus/icons-vue';
 import { computed, inject, nextTick, onBeforeUnmount, ref, watch } from 'vue';
 import { LINKED_EDITOR_KEY } from '../../linkedEditor';
-import TinymceDocEditor from '../TinymceDocEditor.vue';
 
 const props = withDefaults(
   defineProps<{
@@ -50,7 +35,7 @@ const props = withDefaults(
     /** true: 实时回答（流式），false: 历史回显（一次性） */
     animated?: boolean;
   }>(),
-  { animated: true }
+  { animated: true },
 );
 
 const emit = defineEmits<{
@@ -62,12 +47,7 @@ const displayedBody = ref('');
 let streamTimer: number | null = null;
 let syncingFromEditor = false;
 
-const rawContent = computed(
-  () =>
-    (props.step.content && typeof props.step.content === 'object'
-      ? props.step.content
-      : {}) as Record<string, unknown>
-);
+const rawContent = computed(() => (props.step.content && typeof props.step.content === 'object' ? props.step.content : {}) as Record<string, unknown>);
 
 const bodyHtml = computed(() => (rawContent.value.body as string) || '');
 
@@ -97,18 +77,11 @@ const clearStreamTimer = () => {
 const scrollPreviewToBottom = () => {
   nextTick(() => {
     requestAnimationFrame(() => {
-      const host = document.querySelector(
-        '.doc-preview-panel .tox-edit-area iframe'
-      ) as HTMLIFrameElement | null;
+      const host = document.querySelector('.doc-preview-panel .tox-edit-area iframe') as HTMLIFrameElement | null;
       if (host?.contentWindow?.document?.body) {
         const body = host.contentWindow.document.body;
         const doc = host.contentWindow.document.documentElement;
-        const height = Math.max(
-          body.scrollHeight,
-          body.offsetHeight,
-          doc?.scrollHeight || 0,
-          doc?.offsetHeight || 0
-        );
+        const height = Math.max(body.scrollHeight, body.offsetHeight, doc?.scrollHeight || 0, doc?.offsetHeight || 0);
         host.contentWindow.scrollTo({ top: height, behavior: 'auto' });
       }
     });
@@ -158,7 +131,7 @@ watch(
     }
     renderBody(html || '');
   },
-  { immediate: true }
+  { immediate: true },
 );
 
 onBeforeUnmount(() => {
@@ -256,7 +229,10 @@ const onOpenEditor = () => {
   color: #475569;
   font-size: 13px;
   cursor: pointer;
-  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+  transition:
+    background 0.15s ease,
+    border-color 0.15s ease,
+    color 0.15s ease;
 
   &:hover {
     background: #f8fafc;

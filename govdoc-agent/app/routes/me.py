@@ -34,7 +34,15 @@ def get_me(current_user=Depends(get_current_user), db: Session = Depends(get_db)
     dumped["auth_models"] = effective_auth_models(current_user)
     return AgentLoopResponse(
         data={
-            **dumped,
+            "userId": dumped["user_id"],
+            "account": dumped["account"],
+            "name": dumped["name"],
+            "orgName": dumped["org_name"],
+            "orgCode": dumped["org_code"],
+            "authModels": dumped["auth_models"],
+            "defaultModel": dumped["default_model"],
+            "legacySystemUrl": dumped["legacy_system_url"],
+            "isFirstLoginToAgentloop": current_user.is_first_login_to_agentloop,
             "preferredSkills": json.loads(profile.preferred_skills_json or "[]"),
             "recommendationSummary": profile.recommendation_summary,
             "identifyMarkdown": docs["identify_markdown"],

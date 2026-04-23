@@ -1,69 +1,22 @@
 <template>
   <div class="app-shell">
-    <Sidebar
-      ref="sidebarRef"
-      :current-session-id="currentSessionId"
-      @new-chat="handleNewChat"
-      @select-session="handleSelectSession"
-      @session-deleted="handleSessionDeleted"
-      @heartbeat-click="handleHeartbeatClick"
-      @open-cloud-disk="handleOpenCloudDisk"
-    />
+    <Sidebar ref="sidebarRef" :current-session-id="currentSessionId" @new-chat="handleNewChat" @select-session="handleSelectSession" @session-deleted="handleSessionDeleted" @open-cloud-disk="handleOpenCloudDisk" />
 
     <div class="workspace" :class="{ 'editor-open': linkedEditorOpen && linkedEditorStep }">
       <CloudDisk v-if="cloudDiskVisible" @file-open="handleCloudFileOpen" />
 
       <main v-else class="main-content">
-        <div
-          ref="scrollContainerRef"
-          class="main-inner"
-          @scroll="handleScroll"
-          @wheel.passive="handleWheel"
-        >
-          <ConversationView
-            v-if="conversationVisible"
-            :messages="messages"
-            :visible="conversationVisible"
-            @document-edit="handleDocumentEdit"
-            @document-download="handleDocumentDownload"
-            @analysis-export="handleAnalysisExport"
-            @heartbeat-save="handleHeartbeatSave"
-            @heartbeat-cancel="handleHeartbeatCancel"
-            @heartbeat-update="handleHeartbeatUpdate"
-            @copy="handleCopy"
-            @thumb-up="handleThumbUp"
-            @thumb-down="handleThumbDown"
-            @refresh="handleRefresh"
-            @step-rendered="handleStepRendered"
-            @steps-complete="handleStepsComplete"
-          />
+        <div ref="scrollContainerRef" class="main-inner" @scroll="handleScroll" @wheel.passive="handleWheel">
+          <ConversationView v-if="conversationVisible" :messages="messages" :visible="conversationVisible" @copy="handleCopy" @thumb-up="handleThumbUp" @thumb-down="handleThumbDown" @refresh="handleRefresh" @step-rendered="handleStepRendered" @steps-complete="handleStepsComplete" />
           <WelcomeSection v-else @question-click="handleQuestionClick" />
         </div>
 
-        <DecisionActionBar
-          v-if="activeDecision"
-          :prompt="activeDecision.prompt"
-          :description="activeDecision.description"
-          :options="activeDecision.options"
-          @action="handleDecisionAction"
-          @close="closeDecisionBar"
-        />
-        <ChatInput
-          v-show="!activeDecision"
-          ref="inputRef"
-          :show-datasource-menu="showDatasourceMenu"
-          @send="handleSend"
-          @claw-select="handleClawSelect"
-          @datasource-select="handleDatasourceSelect"
-        />
+        <DecisionActionBar v-if="activeDecision" :prompt="activeDecision.prompt" :description="activeDecision.description" :options="activeDecision.options" @action="handleDecisionAction" @close="closeDecisionBar" />
+        <ChatInput v-show="!activeDecision" ref="inputRef" @send="handleSend" @claw-select="handleClawSelect" />
       </main>
 
       <Transition name="linked-editor">
-        <div
-          v-if="linkedEditorOpen && linkedEditorStep"
-          class="linked-editor-shell"
-          :key="linkedPanelKey"
-        >
+        <div v-if="linkedEditorOpen && linkedEditorStep" class="linked-editor-shell" :key="linkedPanelKey">
           <aside class="linked-editor-aside">
             <LinkedEditorPanel :step="linkedEditorStep" @close="closeLinkedEditor" />
           </aside>
@@ -74,9 +27,10 @@
 </template>
 
 <script setup lang="ts">
-import { addMessage, createNewChat, getChatDetail, streamMessage } from '@/api';
+import { addMessage, createNewChat, getChatDetail, getConversationDetail, runConversation, runNewConversation } from '@/api';
+import { createSSEConnection, type AgentLoopEvent } from '@/api/sse';
 import { LINKED_EDITOR_KEY } from '@/views/chat/linkedEditor';
-import { computed, nextTick, provide, ref, watch } from 'vue';
+import { computed, nextTick, onUnmounted, provide, ref, watch } from 'vue';
 import ChatInput from './components/ChatInput.vue';
 import CloudDisk from './components/CloudDisk.vue';
 import ConversationView from './components/ConversationView.vue';
@@ -95,20 +49,35 @@ interface SendData {
 interface AssistantMessageData {
   text?: string;
   textVisible?: boolean;
-  steps?: any;
-  document?: any;
-  documentVisible?: boolean;
-  analysis?: any;
-  analysisVisible?: boolean;
-  heartbeatTask?: any;
-  heartbeatVisible?: boolean;
+  steps?: { title: string; steps: Step[] };
   decisionPrompt?: ChatMessage['decisionPrompt'];
+  streaming?: boolean;
 }
 
-interface StreamMessage {
-  type: string;
-  data: any;
-}
+type BackendMessage = {
+  id: string;
+  role: 'user' | 'assistant' | 'system';
+  content?: string;
+  contentHtml?: string;
+  skillName?: string;
+  createdAt: string;
+};
+
+const mapBackendMessages = (list: BackendMessage[] | undefined): ChatMessage[] => {
+  if (!Array.isArray(list)) return [];
+  return list
+    .filter((msg) => msg.role === 'user' || msg.role === 'assistant')
+    .map((msg) => ({
+      id: msg.id,
+      role: msg.role as 'user' | 'assistant',
+      content: msg.content || '',
+      text: msg.role === 'assistant' ? msg.contentHtml || msg.content || '' : undefined,
+      textVisible: msg.role === 'assistant' ? true : undefined,
+      skill: msg.skillName || null,
+      createdAt: msg.createdAt,
+      streaming: false,
+    }));
+};
 
 const sidebarRef = ref<InstanceType<typeof Sidebar> | null>(null);
 const linkedEditorOpen = ref(false);
@@ -136,7 +105,6 @@ provide(LINKED_EDITOR_KEY, {
   isOpen: linkedEditorOpen,
 });
 const conversationVisible = ref(false);
-const showDatasourceMenu = ref(false);
 const messages = ref<ChatMessage[]>([]);
 const currentSessionId = ref<string>();
 const activeDecision = ref<ChatMessage['decisionPrompt'] | null>(null);
@@ -192,7 +160,7 @@ watch(
     if (autoScroll.value && !isRestoringHistory.value && !isSwitchingSession.value) {
       scrollToBottom('smooth');
     }
-  }
+  },
 );
 
 watch(
@@ -206,7 +174,7 @@ watch(
     if (autoScroll.value && !isRestoringHistory.value && !isSwitchingSession.value) {
       scrollToBottom('smooth');
     }
-  }
+  },
 );
 
 watch(
@@ -216,7 +184,7 @@ watch(
       autoScroll.value = true;
       if (!isRestoringHistory.value && !isSwitchingSession.value) scrollToBottom('smooth');
     }
-  }
+  },
 );
 
 const cloudDiskVisible = ref(false);
@@ -230,6 +198,8 @@ const handleCloudFileOpen = (file: { id: string; name: string; type: string }) =
 };
 
 const handleNewChat = (session: ChatSession) => {
+  activeStream.value?.close();
+  activeStream.value = null;
   cloudDiskVisible.value = false;
   currentSessionId.value = session.id;
   messages.value = [];
@@ -241,6 +211,8 @@ const handleNewChat = (session: ChatSession) => {
 };
 
 const handleSelectSession = async (sessionId: string) => {
+  activeStream.value?.close();
+  activeStream.value = null;
   cloudDiskVisible.value = false;
   currentSessionId.value = sessionId;
   activeDecision.value = null;
@@ -250,8 +222,13 @@ const handleSelectSession = async (sessionId: string) => {
   isRestoringHistory.value = true;
   isSwitchingSession.value = true;
   try {
-    const res = await getChatDetail(sessionId);
-    messages.value = res.data.messages || [];
+    if (sessionId.startsWith('local-')) {
+      const res = await getChatDetail(sessionId);
+      messages.value = res.data.messages || [];
+    } else {
+      const detail = await getConversationDetail(sessionId);
+      messages.value = mapBackendMessages(detail.messages);
+    }
     conversationVisible.value = messages.value.length > 0;
   } catch (error) {
     console.error('加载会话详情失败:', error);
@@ -269,6 +246,8 @@ const handleSelectSession = async (sessionId: string) => {
 
 const handleSessionDeleted = (sessionId: string) => {
   if (currentSessionId.value === sessionId) {
+    activeStream.value?.close();
+    activeStream.value = null;
     currentSessionId.value = void 0;
     messages.value = [];
     conversationVisible.value = false;
@@ -280,6 +259,7 @@ const handleSessionDeleted = (sessionId: string) => {
 };
 
 const inputRef = ref<InstanceType<typeof ChatInput> | null>(null);
+const activeStream = ref<{ close: () => void } | null>(null);
 
 const handleQuestionClick = (question: string) => {
   // 填充到输入框
@@ -311,12 +291,7 @@ const handleSend = async (data: SendData) => {
   }
 };
 
-const handleDecisionAction = (option: {
-  id: string;
-  label: string;
-  sendText?: string;
-  text?: string;
-}) => {
+const handleDecisionAction = (option: { id: string; label: string; sendText?: string; text?: string }) => {
   activeDecision.value = null;
   pendingDecision.value = null;
   waitStepsCompleteForDecision.value = false;
@@ -328,7 +303,7 @@ const handleDecisionAction = (option: {
     });
     return;
   }
-  inputRef.value.setInputText(option.text || '');
+  inputRef.value?.setInputText(option.text || '');
 };
 
 const closeDecisionBar = () => {
@@ -339,48 +314,6 @@ const closeDecisionBar = () => {
 
 const handleClawSelect = (claw: string | null) => {
   console.log('选择 Claw:', claw);
-};
-
-const handleDatasourceSelect = (option: string) => {
-  showDatasourceMenu.value = false;
-  console.log('选择数据源选项:', option);
-  addAssistantMessage({
-    text: `已选择：<strong>${option === 'auto' ? '自动寻找' : option === 'upload' ? '上传文件' : '手动补充'}</strong>`,
-    textVisible: true,
-  });
-};
-
-const handleHeartbeatClick = () => {
-  conversationVisible.value = true;
-  showHeartbeatTask();
-};
-
-const handleDocumentEdit = (document: any) => {
-  console.log('编辑文档:', document);
-};
-
-const handleDocumentDownload = (document: any) => {
-  console.log('下载文档:', document);
-};
-
-const handleAnalysisExport = (analysis: any) => {
-  console.log('导出分析:', analysis);
-};
-
-const handleHeartbeatSave = (task: any) => {
-  console.log('保存心跳任务:', task);
-  addAssistantMessage({
-    text: '✅ 当前状态已更新。如果还需新增标签可告知我。',
-    textVisible: true,
-  });
-};
-
-const handleHeartbeatCancel = () => {
-  console.log('取消心跳任务');
-};
-
-const handleHeartbeatUpdate = (data: any) => {
-  console.log('更新心跳任务:', data);
 };
 
 const handleCopy = (message: ChatMessage) => {
@@ -412,11 +345,7 @@ const handleStepsComplete = (message: ChatMessage) => {
   }
 };
 
-const addUserMessage = async (
-  content: string,
-  attachment: any = null,
-  skill: string | null = null,
-) => {
+const addUserMessage = async (content: string, attachment: any = null, skill: string | null = null) => {
   const message: ChatMessage = {
     id: `user-${Date.now()}`,
     role: 'user',
@@ -427,14 +356,11 @@ const addUserMessage = async (
   };
   messages.value.push(message);
 
-  if (currentSessionId.value) {
+  if (currentSessionId.value && currentSessionId.value.startsWith('local-')) {
     try {
       await addMessage(currentSessionId.value, message);
       if (sidebarRef.value) {
-        sidebarRef.value.updateSessionTitle(
-          currentSessionId.value,
-          content.slice(0, 20) + (content.length > 20 ? '...' : '')
-        );
+        sidebarRef.value.updateSessionTitle(currentSessionId.value, content.slice(0, 20) + (content.length > 20 ? '...' : ''));
       }
     } catch (error) {
       console.error('保存消息失败:', error);
@@ -466,149 +392,109 @@ const processAssistantResponse = (data: SendData) => {
     streaming: true,
   });
 
-  streamMessage(
-    { content: data.text, sessionId: currentSessionId.value || '' },
-    (message: StreamMessage) => {
-      console.log('streamMessage', message);
-      const currentMsg = messages.value[assistantMessageIndex];
-      if (!currentMsg) return;
+  const currentId = currentSessionId.value || '';
+  const isDraft = currentId.startsWith('local-');
 
-      switch (message.type) {
-        case 'step_title':
+  const payload = {
+    content: data.text,
+    model: data.model,
+    skill: data.skill || data.claw || null,
+  };
+
+  const connect = async () => {
+    try {
+      const runRes = isDraft ? await runNewConversation(payload) : await runConversation(currentId, payload);
+
+      if (isDraft && currentSessionId.value) {
+        const oldId = currentSessionId.value;
+        currentSessionId.value = runRes.conversationId;
+        sidebarRef.value?.replaceSessionId(oldId, runRes.conversationId, runRes.conversationTitle);
+      }
+
+      activeStream.value?.close();
+      activeStream.value = createSSEConnection(runRes.streamUrl, {
+        onEvent: (event: AgentLoopEvent) => {
+          const currentMsg = messages.value[assistantMessageIndex];
+          if (!currentMsg) return;
           if (!currentMsg.steps || Array.isArray(currentMsg.steps)) {
             currentMsg.steps = { title: '', steps: [] };
           }
-          currentMsg.steps.title = message.data?.title || '';
-          break;
+          const stepList = currentMsg.steps.steps;
 
-        case 'step':
-          // 新增步骤（出现节奏由 AgentSteps + streaming-complete 控制；滚动由 step-rendered / watch 处理）
-          if (!currentMsg.steps || Array.isArray(currentMsg.steps)) {
-            currentMsg.steps = { title: '', steps: [] };
+          const display = event.display;
+          if (event.eventType === 'waiting_user') {
+            const promptMenu = (event.payload?.promptMenu || {}) as Record<string, any>;
+            const decision = {
+              prompt: (promptMenu.title as string) || event.title || '请继续选择',
+              description: promptMenu.description as string | undefined,
+              options: Array.isArray(promptMenu.options)
+                ? promptMenu.options.map((opt: any) => ({
+                    id: String(opt.key || ''),
+                    label: String(opt.label || opt.key || '选项'),
+                    variant: opt.recommended ? 'primary' : 'default',
+                  }))
+                : [],
+            };
+            currentMsg.decisionPrompt = decision;
+            pendingDecision.value = decision;
+            return;
           }
-          const stepList = Array.isArray(currentMsg.steps.steps) ? currentMsg.steps.steps : [];
-          if (!Array.isArray(currentMsg.steps.steps)) {
-            currentMsg.steps.steps = stepList;
-          }
+
+          if (display?.visible === false) return;
+          console.log('event', event);
           stepList.push({
-            ...message.data,
-            open: false, // 默认折叠
-            clientStepId: `cs-${Date.now()}-${stepList.length}`,
+            type: event.eventType === 'tool_call' ? 'tool' : event.eventType === 'created' ? 'think' : 'plainText',
+            label: display?.title || event.title || '执行步骤',
+            contentType: 'html',
+            content: event.detailHtml || event.detail || display?.subtitle || '',
+            open: false,
+            clientStepId: `sse-${event.seqNo ?? Date.now()}-${stepList.length}`,
           });
-          break;
-
-        case 'step_content':
-          // 更新最后一个步骤的内容
-          if (
-            currentMsg.steps &&
-            Array.isArray(currentMsg.steps.steps) &&
-            currentMsg.steps.steps.length > 0
-          ) {
-            const lastStep = currentMsg.steps.steps[currentMsg.steps.steps.length - 1];
-            Object.assign(lastStep, message.data);
-          }
-          if (autoScroll.value) {
-            scrollToBottom();
-          }
-          break;
-
-        case 'document':
-          currentMsg.document = { ...message.data };
-          currentMsg.documentVisible = true;
-          break;
-
-        case 'document_content':
-          if (currentMsg.document) {
-            Object.assign(currentMsg.document, message.data);
-          }
-          break;
-
-        case 'analysis':
-          currentMsg.analysis = { ...message.data };
-          currentMsg.analysisVisible = true;
-          break;
-
-        case 'text':
-          // 流式文本更新
-          currentMsg.text = message.data.text || message.data;
-          if (!currentMsg.textVisible) {
-            currentMsg.textVisible = true;
-          }
-          break;
-
-        case 'text_done':
-          // 文本完成，可以触发一些后续操作
-          break;
-
-        case 'decision_prompt':
-          currentMsg.decisionPrompt = message.data;
-          pendingDecision.value = message.data;
-          break;
-
-        case 'done':
-          // 完成，保存消息
-          if (currentMsg.decisionPrompt) {
-            waitStepsCompleteForDecision.value = true;
-            if (
-              !currentMsg.steps ||
-              !Array.isArray(currentMsg.steps.steps) ||
-              currentMsg.steps.steps.length === 0
-            ) {
-              currentMsg.streaming = false;
-              activeDecision.value = currentMsg.decisionPrompt;
-              waitStepsCompleteForDecision.value = false;
-              pendingDecision.value = null;
+        },
+        onDone: async () => {
+          const currentMsg = messages.value[assistantMessageIndex];
+          if (!currentMsg || !currentSessionId.value) return;
+          try {
+            const detail = await getConversationDetail(currentSessionId.value);
+            const lastAssistant = [...detail.messages].reverse().find((m) => m.role === 'assistant');
+            if (lastAssistant) {
+              currentMsg.text = lastAssistant.contentHtml || lastAssistant.content || '';
+              currentMsg.textVisible = true;
             }
-          } else if (
-            !currentMsg.steps ||
-            !Array.isArray(currentMsg.steps.steps) ||
-            currentMsg.steps.steps.length === 0
-          ) {
+          } catch (error) {
+            console.error('拉取会话详情失败:', error);
+          } finally {
             currentMsg.streaming = false;
           }
-          saveAssistantMessages();
-          break;
-
-        case 'error':
-          // 错误处理
-          console.error('Stream error:', message.data);
-          currentMsg.streaming = false;
-          currentMsg.text = message.data.message || '抱歉，处理您的请求时出现错误，请稍后重试。';
-          currentMsg.textVisible = true;
-          break;
-      }
-    },
-    (error: any) => {
-      console.error('Stream connection error:', error);
+        },
+        onError: (error: Error) => {
+          console.error('Stream connection error:', error);
+          const currentMsg = messages.value[assistantMessageIndex];
+          if (currentMsg) {
+            currentMsg.streaming = false;
+            currentMsg.text = '抱歉，连接中断，请重试。';
+            currentMsg.textVisible = true;
+          }
+        },
+      });
+    } catch (error) {
       const currentMsg = messages.value[assistantMessageIndex];
       if (currentMsg) {
         currentMsg.streaming = false;
-        currentMsg.text = '抱歉，连接中断，请重试。';
+        currentMsg.text = '抱歉，请求失败，请稍后重试。';
         currentMsg.textVisible = true;
       }
-    },
-    () => {
-      console.log('Stream completed');
+      console.error('运行会话失败:', error);
     }
-  );
+  };
+
+  void connect();
 };
 
-const saveAssistantMessages = async () => {
-  if (!currentSessionId.value) return;
-
-  const assistantMessages = messages.value.filter((m) => m.role === 'assistant');
-  for (const msg of assistantMessages) {
-    try {
-      await addMessage(currentSessionId.value, msg);
-    } catch (error) {
-      console.error('保存助手消息失败:', error);
-    }
-  }
-};
-
-const showHeartbeatTask = () => {
-  addAssistantMessage({ heartbeatTask: null, heartbeatVisible: true });
-};
+onUnmounted(() => {
+  activeStream.value?.close();
+  activeStream.value = null;
+});
 </script>
 
 <style scoped lang="scss">
@@ -618,11 +504,7 @@ const showHeartbeatTask = () => {
   width: 100vw;
   overflow: hidden;
   min-width: 0;
-  background:
-    radial-gradient(ellipse 80% 50% at 20% -10%, rgba(0, 47, 134, 0.1) 0%, transparent 60%),
-    radial-gradient(ellipse 60% 40% at 80% 110%, rgba(50, 114, 231, 0.08) 0%, transparent 55%),
-    radial-gradient(ellipse 40% 30% at 60% 50%, rgba(0, 97, 255, 0.04) 0%, transparent 50%),
-    linear-gradient(160deg, #f0f4ff 0%, #f8faff 40%, #eef2fb 100%);
+  background: radial-gradient(ellipse 80% 50% at 20% -10%, rgba(0, 47, 134, 0.1) 0%, transparent 60%), radial-gradient(ellipse 60% 40% at 80% 110%, rgba(50, 114, 231, 0.08) 0%, transparent 55%), radial-gradient(ellipse 40% 30% at 60% 50%, rgba(0, 97, 255, 0.04) 0%, transparent 50%), linear-gradient(160deg, #f0f4ff 0%, #f8faff 40%, #eef2fb 100%);
   background-attachment: fixed;
 }
 
