@@ -20,6 +20,9 @@ class V4Conversation(Base):
     title: Mapped[str] = mapped_column(String(255), default="新对话")
     pinned: Mapped[bool] = mapped_column(Boolean, default=False)
     is_deleted: Mapped[bool] = mapped_column(Boolean, default=False)
+    title_locked: Mapped[bool] = mapped_column(Boolean, default=False)
+    title_version: Mapped[int] = mapped_column(Integer, default=0)
+    title_last_summarized_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     running_context_summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     running_context_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     last_run_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
@@ -42,6 +45,9 @@ class V4ConversationMessage(Base):
     content_html: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     annotations_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     meta_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # schema v2+ 起 assistant 消息权威数据源；按 Claude Agent SDK 风格的 content[] blocks。
+    content_blocks_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    schema_version: Mapped[int] = mapped_column(Integer, default=2, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
@@ -108,6 +114,11 @@ class V4WorkspaceNode(Base):
     parent_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
     owner_user_id: Mapped[str] = mapped_column(String(255), index=True)
     owner_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    path: Mapped[Optional[str]] = mapped_column(String(1000), nullable=True, index=True)
+    kind: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    size: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    etag: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    title_override: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     node_type: Mapped[str] = mapped_column(String(32))
     source: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     name: Mapped[str] = mapped_column(String(255))

@@ -1,142 +1,156 @@
 <script setup>
-import { computed, ref } from "vue";
-import { marked } from "marked";
-
-marked.use({ breaks: true, gfm: true });
-
-function renderStepDetail(detailHtml, fallbackText) {
-  const raw = String(detailHtml || "").trim();
-  const fb = String(fallbackText || "").trim();
-  if (raw && /<(div|section|article|table|ul|ol|h[1-6])\b/i.test(raw)) {
-    return raw;
-  }
-  const text = fb || raw.replace(/<[^>]+>/g, "").trim();
-  if (!text) {
-    return raw || "";
-  }
-  return marked.parse(text);
-}
+import { computed } from "vue";
 
 const props = defineProps({
   events: {
     type: Array,
     default: () => [],
   },
-  stepOutcomes: {
-    type: Array,
-    default: () => [],
-  },
 });
 
-const expandedIds = ref([]);
+const emit = defineEmits(["open-artifact"]);
 
-const visibleEvents = computed(() => {
-  const ordered = [];
-  const byCardKey = new Map();
-  for (const event of props.events) {
-    const display = event.display || {};
-    if (!display.visible) {
-      continue;
+const flowItems = computed(() => {
+  const items = [];
+  for (const entry of props.events || []) {
+    if (entry?.type === "assistant") {
+      for (const block of entry?.message?.content || []) {
+        if (!block?.type) {
+          continue;
+        }
+        if (block.type === "tool_use" || block.type === "tool_result") {
+          items.push({
+            key: block.id || block.tool_use_id || `${entry.message?.id}-${block.type}`,
+            kind: block.type,
+            icon: block.type === "tool_use" ? "play_circle" : "task_alt",
+            title: block.display_label || block.name || "执行步骤",
+            summary: block.summary || block.metadata?.detail || "",
+            status: block.status || (block.type === "tool_use" ? "running" : "completed"),
+          });
+        }
+        if (block.type === "artifact") {
+          items.push({
+            key: block.id || `${entry.message?.id}-artifact`,
+            kind: "artifact",
+            icon: block.status === "artifact_error" ? "warning" : "description",
+            title: block.title || "交付物",
+            summary: block.errorDetail || block.summary || "",
+            status: block.status || "ready",
+            artifact: block,
+          });
+        }
+      }
     }
-    const cardKey = display.cardKey || event.id || event.seqNo;
-    if (!byCardKey.has(cardKey)) {
-      ordered.push(cardKey);
+    if (entry?.type === "result" && entry?.subtype === "error") {
+      items.push({
+        key: `${entry.run_id || "run"}-result-error`,
+        kind: "result_error",
+        icon: "error",
+        title: "执行异常",
+        summary: entry?.error?.message || entry?.summary || "执行失败",
+        status: "failed",
+      });
     }
-    byCardKey.set(cardKey, { ...event, display: { ...display, cardKey } });
   }
-  return ordered.map((key) => byCardKey.get(key));
+  return items;
 });
-
-const visibleStepOutcomes = computed(() =>
-  (props.stepOutcomes || []).map((step, index) => ({
-    id: step.task_id || `history-step-${index}`,
-    eventType: step.retryable ? "waiting_user" : step.error_detail ? "failed" : "completed",
-    title: step.title || step.summary || `步骤 ${index + 1}`,
-    detail: step.summary || step.title || "已生成结果。",
-    detailHtml: step.html || "",
-    display: {
-      visible: true,
-      cardKey: step.task_id || `history-step-${index}`,
-      title: step.title || step.summary || `步骤 ${index + 1}`,
-      subtitle: step.summary || step.title || "已生成结果。",
-      status: step.retryable ? "waiting_user" : step.error_detail ? "failed" : "completed",
-    },
-  }))
-);
-
-const timelineItems = computed(() => (visibleEvents.value.length ? visibleEvents.value : visibleStepOutcomes.value));
-
-function iconClass(eventType) {
-  const mapping = {
-    created: "think",
-    running: "claw",
-    tool_call: "tool",
-    waiting_user: "skill",
-    completed: "skill",
-    failed: "cli",
-  };
-  return mapping[eventType] || "tool";
-}
-
-function iconName(eventType) {
-  const mapping = {
-    created: "psychology",
-    running: "robot_2",
-    tool_call: "build",
-    waiting_user: "person_alert",
-    completed: "task_alt",
-    failed: "error",
-  };
-  return mapping[eventType] || "build";
-}
-
-function toggle(id) {
-  if (expandedIds.value.includes(id)) {
-    expandedIds.value = expandedIds.value.filter((item) => item !== id);
-    return;
-  }
-  expandedIds.value = [...expandedIds.value, id];
-}
-
-function isExpanded(id) {
-  return expandedIds.value.includes(id);
-}
 </script>
 
 <template>
-  <div class="agent-steps">
+  <div v-if="flowItems.length" class="flow-list">
     <article
-      v-for="event in timelineItems"
-      :key="event.display?.cardKey || event.id || event.seqNo"
-      class="agent-step"
-      :class="{ open: isExpanded(event.display?.cardKey || event.id || event.seqNo) }"
+      v-for="item in flowItems"
+      :key="item.key"
+      class="flow-card"
+      :class="[`is-${item.status}`]"
     >
-      <button
-        class="step-header clickable"
-        type="button"
-        @click="toggle(event.display?.cardKey || event.id || event.seqNo)"
-      >
-        <span class="step-icon" :class="iconClass(event.display?.status || event.eventType)">
-          <span class="material-symbols-rounded">{{ iconName(event.display?.status || event.eventType) }}</span>
-        </span>
-        <span class="step-label">
-          <strong>{{ event.display?.title || event.title }}</strong>
-          {{ event.display?.subtitle || event.detail || event.eventType }}
-        </span>
-        <span class="step-chevron material-symbols-rounded">expand_more</span>
-      </button>
-      <div v-if="isExpanded(event.display?.cardKey || event.id || event.seqNo)" class="step-content">
-        <div
-          v-if="event.detailHtml || event.display?.subtitle || event.detail"
-          class="markdown-body step-detail-md"
-          v-html="
-            renderStepDetail(
-              event.detailHtml,
-              event.display?.subtitle || event.detail || ''
-            )
-          "
-        />
+      <div class="flow-card-main">
+        <span class="flow-card-icon material-symbols-rounded">{{ item.icon }}</span>
+        <div class="flow-card-copy">
+          <div class="flow-card-title">{{ item.title }}</div>
+          <div v-if="item.summary" class="flow-card-summary">{{ item.summary }}</div>
+        </div>
       </div>
+      <button
+        v-if="item.artifact && (item.artifact.workspaceNodeId || item.artifact.id)"
+        class="flow-card-action"
+        type="button"
+        @click="emit('open-artifact', item.artifact)"
+      >
+        打开
+      </button>
     </article>
   </div>
 </template>
+
+<style scoped>
+.flow-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.flow-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border-radius: 16px;
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  background: #ffffff;
+}
+
+.flow-card.is-running {
+  background: #f8fafc;
+}
+
+.flow-card.is-completed,
+.flow-card.is-ready {
+  background: #f0fdf4;
+}
+
+.flow-card.is-artifact_error,
+.flow-card.is-failed {
+  background: #fef2f2;
+}
+
+.flow-card-main {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  min-width: 0;
+}
+
+.flow-card-icon {
+  font-size: 18px;
+  color: #4b5563;
+}
+
+.flow-card-copy {
+  min-width: 0;
+}
+
+.flow-card-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: #111827;
+}
+
+.flow-card-summary {
+  margin-top: 3px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #6b7280;
+}
+
+.flow-card-action {
+  flex-shrink: 0;
+  border: none;
+  border-radius: 999px;
+  padding: 8px 12px;
+  background: #111827;
+  color: #fff;
+  cursor: pointer;
+}
+</style>

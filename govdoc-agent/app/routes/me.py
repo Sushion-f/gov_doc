@@ -11,6 +11,7 @@ import json
 from sqlalchemy.orm import Session
 
 from ..auth import get_current_user
+from ..config import settings
 from ..db import get_db
 from ..model_catalog import effective_auth_models
 from ..runtime import _ensure_memory_docs, first_login_to_agent_app, read_profile_docs
@@ -21,7 +22,16 @@ router = APIRouter(prefix="/api/agentloop", tags=["agentloop-me"])
 
 @router.get("/health", response_model=AgentLoopResponse)
 def health():
-    return AgentLoopResponse(data={"status": "ok"})
+    return AgentLoopResponse(
+        data={
+            "status": "ok",
+            # 便于排查「model.log 不更新」：确认当前进程开关与落盘路径（无敏感信息）
+            "debugRuntimeLogs": settings.debug_runtime_logs,
+            "debugLogStyle": settings.debug_log_style,
+            "modelLogPath": settings.model_log_path,
+            "backendLogPath": settings.backend_log_path,
+        }
+    )
 
 
 @router.get("/me", response_model=AgentLoopResponse)
@@ -31,6 +41,7 @@ def get_me(current_user=Depends(get_current_user), db: Session = Depends(get_db)
     docs = read_profile_docs(current_user, profile)
     db.commit()
     dumped = current_user.model_dump()
+    dumped["default_model"] = profile.default_model or current_user.default_model
     dumped["auth_models"] = effective_auth_models(current_user)
     return AgentLoopResponse(
         data={

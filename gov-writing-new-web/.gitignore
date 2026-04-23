@@ -1,0 +1,6 @@
+# 构建与缓存（可 npm run build / dev 再生）
+dist/
+node_modules/
+runtime_logs/
+vite-*.log
+

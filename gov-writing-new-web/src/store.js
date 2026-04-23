@@ -26,6 +26,9 @@ export const state = reactive({
   currentConversation: null,
   currentEvents: [],
   currentRunId: null,
+  latestTodoList: null,
+  contextUsage: null,
+  compactionHistory: [],
   pendingPromptMenu: null,
   activeQuickSkill: "",
   sidebarCollapsed: false,
@@ -47,6 +50,170 @@ export const state = reactive({
 });
 
 let activeRunController = null;
+const KNOWN_PROTOCOL_TYPES = new Set([
+  "system",
+  "block_append",
+  "block_update",
+  "message_complete",
+  "result",
+  // 兼容旧事件类型（暂不再主动发，但前端容错）
+  "assistant",
+  "stream_event",
+]);
+
+function normalizeIncomingEvent(event) {
+  if (!event || typeof event !== "object") {
+    return event;
+  }
+  const type = String(event.type || "");
+  if (KNOWN_PROTOCOL_TYPES.has(type)) {
+    return event;
+  }
+  if (import.meta.env.DEV) {
+    console.warn("[Protocol] Unknown item type:", type, event);
+  }
+  return { ...event, type: "system", subtype: "unknown", data: event };
+}
+
+function getStreamingAssistantMessage() {
+  const msgs = state.currentConversation?.messages || [];
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const m = msgs[i];
+    if (m && m.role === "assistant" && String(m.id).startsWith("temp-assistant")) {
+      return m;
+    }
+  }
+  return null;
+}
+
+function upsertContentBlock(block, { updateKind = "append" } = {}) {
+  const target = getStreamingAssistantMessage();
+  if (!target) {
+    return;
+  }
+  if (!Array.isArray(target.contentBlocks)) {
+    target.contentBlocks = [];
+  }
+  const existingIndex = target.contentBlocks.findIndex((item) => item && item.id === block.id);
+  if (updateKind === "update" || existingIndex >= 0) {
+    if (existingIndex >= 0) {
+      target.contentBlocks.splice(existingIndex, 1, { ...target.contentBlocks[existingIndex], ...block });
+    } else {
+      target.contentBlocks.push(block);
+    }
+  } else {
+    target.contentBlocks.push(block);
+  }
+  if (block.type === "text") {
+    const textAggregate = target.contentBlocks
+      .filter((item) => item && item.type === "text")
+      .map((item) => String(item.text || ""))
+      .join("\n\n")
+      .trim();
+    if (textAggregate) {
+      target.content = textAggregate;
+      target.contentHtml = marked.parse(textAggregate);
+    }
+  }
+  state.streamScrollTick += 1;
+}
+
+function replaceMessageWithFinalBlocks(finalMessageId, blocks) {
+  const msgs = state.currentConversation?.messages || [];
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const m = msgs[i];
+    if (!m || m.role !== "assistant") {
+      continue;
+    }
+    if (String(m.id).startsWith("temp-assistant")) {
+      m.id = finalMessageId || m.id;
+      m.contentBlocks = Array.isArray(blocks) && blocks.length ? blocks : m.contentBlocks || [];
+      const textAggregate = (m.contentBlocks || [])
+        .filter((item) => item && item.type === "text")
+        .map((item) => String(item.text || ""))
+        .join("\n\n")
+        .trim();
+      if (textAggregate) {
+        m.content = textAggregate;
+        m.contentHtml = marked.parse(textAggregate);
+      }
+      state.streamScrollTick += 1;
+      return;
+    }
+  }
+}
+
+function applyProtocolItem(item, conversationId) {
+  const normalized = normalizeIncomingEvent(item);
+  if (normalized.type === "system") {
+    if (normalized.subtype === "todo_list" && normalized.data?.steps) {
+      state.latestTodoList = {
+        ...normalized.data,
+        currentStepId: normalized.data.current_step_id || normalized.data.currentStepId || null,
+      };
+      if (state.currentConversation?.id === conversationId) {
+        state.currentConversation.latestTodoList = state.latestTodoList;
+      }
+    }
+    if (normalized.subtype === "waiting_input") {
+      state.pendingPromptMenu = normalized.data?.promptMenu
+        ? {
+            ...normalized.data,
+            promptMenu: normalized.data.promptMenu,
+          }
+        : state.pendingPromptMenu;
+      if (state.currentConversation?.id === conversationId) {
+        state.currentConversation.pendingPromptMenu =
+          state.pendingPromptMenu?.promptMenu || state.currentConversation.pendingPromptMenu;
+      }
+    }
+    return normalized;
+  }
+  if (normalized.type === "block_append" || normalized.type === "block_update") {
+    ensureCurrentConversationShape(conversationId);
+    const block = normalized.block || {};
+    if (!block || !block.type) {
+      return normalized;
+    }
+    // thinking block 流式输出同时镜像到顶部 streamingPlannerReasoning 上
+    if (block.type === "thinking") {
+      state.streamingPlannerReasoning = String(block.thinking || "");
+    }
+    // todo_list block 同步到 latestTodoList，让原有 todo 条继续工作
+    if (block.type === "todo_list") {
+      const steps = (block.items || []).map((item) => ({
+        id: item.id,
+        title: item.text,
+        status: item.status || "pending",
+      }));
+      if (steps.length) {
+        state.latestTodoList = {
+          steps,
+          current_step_id: steps.find((step) => step.status !== "completed")?.id || null,
+          currentStepId: steps.find((step) => step.status !== "completed")?.id || null,
+        };
+        if (state.currentConversation?.id === conversationId) {
+          state.currentConversation.latestTodoList = state.latestTodoList;
+        }
+      }
+    }
+    upsertContentBlock(block, {
+      updateKind: normalized.type === "block_update" ? "update" : "append",
+    });
+    return normalized;
+  }
+  if (normalized.type === "message_complete") {
+    ensureCurrentConversationShape(conversationId);
+    replaceMessageWithFinalBlocks(normalized.message_id, normalized.content || []);
+    return normalized;
+  }
+  if (normalized.type === "result") {
+    state.currentEvents = [...state.currentEvents, normalized];
+    return normalized;
+  }
+  // 兼容旧协议：不再解析，记录用于观察
+  return normalized;
+}
 
 export function abortCurrentRun() {
   activeRunController?.abort();
@@ -192,14 +359,24 @@ export async function selectConversation(conversationId) {
   state.currentConversationId = conversationId;
   const response = await requestJson(`/api/agentloop/conversations/${conversationId}`);
   state.currentConversation = response.data;
+  state.latestTodoList = response.data?.latestTodoList || null;
+  state.contextUsage =
+    response.data?.runningContext?.contextUsage ||
+    response.data?.runningContext?.context_usage ||
+    null;
   state.pendingPromptMenu = response.data?.pendingPromptMenu || null;
   const summary = state.conversations.find((item) => item.id === conversationId);
   if (summary?.lastRunId) {
     try {
-      state.currentEvents = await readEventStream(
+      const replay = await readEventStream(
         `/api/agentloop/conversations/${conversationId}/events?run_id=${summary.lastRunId}`,
         { timeoutMs: EVENT_STREAM_TIMEOUT_MS }
       );
+      state.currentEvents = [];
+      state.streamingPlannerReasoning = "";
+      for (const item of replay) {
+        applyProtocolItem(item, conversationId);
+      }
     } catch (error) {
       state.currentEvents = [];
     }
@@ -210,11 +387,32 @@ export async function selectConversation(conversationId) {
 }
 
 export async function renameConversation(conversationId, payload) {
-  await requestJson(`/api/agentloop/conversations/${conversationId}`, {
+  const response = await requestJson(`/api/agentloop/conversations/${conversationId}`, {
     method: "PUT",
     body: JSON.stringify(payload),
   });
   await refreshConversations();
+  if (state.currentConversationId === conversationId && state.currentConversation && payload?.title != null) {
+    state.currentConversation.title = response.data?.title || payload.title;
+  }
+}
+
+export async function compactConversation(conversationId) {
+  if (!conversationId) {
+    return null;
+  }
+  const response = await requestJson(`/api/agentloop/conversations/${conversationId}/compact`, {
+    method: "POST",
+  });
+  await refreshConversations();
+  if (state.currentConversationId === conversationId && state.currentConversation) {
+    state.currentConversation.runningContext = response.data?.runningContext || null;
+  }
+  state.contextUsage =
+    response.data?.runningContext?.contextUsage ||
+    response.data?.runningContext?.context_usage ||
+    state.contextUsage;
+  return response.data;
 }
 
 export async function deleteConversation(conversationId) {
@@ -223,6 +421,9 @@ export async function deleteConversation(conversationId) {
   if (state.currentConversationId === conversationId) {
     state.currentConversationId = null;
     state.currentConversation = null;
+    state.latestTodoList = null;
+    state.contextUsage = null;
+    state.compactionHistory = [];
   }
 }
 
@@ -232,7 +433,7 @@ async function replayEvents(conversationId, runId) {
   });
   state.currentEvents = [];
   for (const event of events) {
-    state.currentEvents.push(event);
+    applyProtocolItem(event, conversationId);
     await new Promise((resolve) => window.setTimeout(resolve, 120));
   }
 }
@@ -244,7 +445,9 @@ export function ensureCurrentConversationShape(conversationId) {
       title: "",
       messages: [],
       artifacts: [],
+      runningContext: null,
       pendingPromptMenu: null,
+      latestTodoList: null,
     };
   }
   if (!Array.isArray(state.currentConversation.messages)) {
@@ -274,16 +477,16 @@ function appendOptimisticMessages({ content, model }) {
       role: "assistant",
       content: "执行中",
       contentHtml: "<p>正在处理你的请求，步骤卡片会实时更新。</p>",
+      contentBlocks: [],
       model,
-      meta: {
-        stepOutcomes: [],
-      },
+      meta: {},
     },
   ];
 }
 
 async function streamConversationEvents(conversationId, runId) {
   state.currentEvents = [];
+  state.latestTodoList = state.currentConversation?.latestTodoList || state.latestTodoList || null;
   if (activeRunController) {
     activeRunController.abort();
   }
@@ -293,35 +496,7 @@ async function streamConversationEvents(conversationId, runId) {
       timeoutMs: LONG_REQUEST_TIMEOUT_MS,
       signal: activeRunController.signal,
       onEvent(event) {
-        if (event.eventType !== "text_delta" && event.eventType !== "planner_reasoning_delta") {
-          state.currentEvents = [...state.currentEvents, event];
-        }
-        if (event.eventType === "planner_reasoning_delta") {
-          state.streamingPlannerReasoning = event.payload?.reasoningSoFar ?? event.detail ?? "";
-          state.streamScrollTick += 1;
-        }
-        if (event.eventType === "text_delta") {
-          const text = event.payload?.textSoFar ?? event.detail ?? "";
-          ensureCurrentConversationShape(conversationId);
-          const msgs = state.currentConversation.messages || [];
-          for (let i = msgs.length - 1; i >= 0; i--) {
-            const m = msgs[i];
-            if (m.role === "assistant" && String(m.id).startsWith("temp-assistant")) {
-              m.content = text;
-              m.contentHtml = marked.parse(text || "");
-              state.streamScrollTick += 1;
-              break;
-            }
-          }
-        }
-        if (event.eventType === "waiting_user") {
-          state.pendingPromptMenu = event.payload?.promptMenu
-            ? {
-                ...event.payload,
-                promptMenu: event.payload.promptMenu,
-              }
-            : state.pendingPromptMenu;
-        }
+        applyProtocolItem(event, conversationId);
       },
     });
   } catch (err) {
@@ -340,6 +515,7 @@ export async function runConversation({
   model,
   skill,
   attachments = [],
+  operationContext = null,
   resumeFromWaiting = false,
   selectedOption = null,
   promptMenuInput = null,
@@ -351,6 +527,8 @@ export async function runConversation({
   state.runLoading = true;
   state.errorMessage = "";
   state.currentEvents = [];
+  state.latestTodoList = state.currentConversation?.latestTodoList || null;
+  state.contextUsage = state.currentConversation?.runningContext?.contextUsage || state.contextUsage;
   state.streamingPlannerReasoning = "";
   try {
     appendOptimisticMessages({ content, model: model || state.user?.default_model || "" });
@@ -361,6 +539,7 @@ export async function runConversation({
         model,
         skill,
         attachments,
+        operation_context: operationContext,
         resume_from_waiting: resumeFromWaiting,
         selected_option: selectedOption,
         prompt_menu_input: promptMenuInput,
@@ -479,6 +658,9 @@ export async function loadSettings() {
     requestJson("/api/agentloop/settings/templates"),
   ]);
   state.settingsProfile = profile.data;
+  if (state.user && profile.data?.defaultModel) {
+    state.user.default_model = profile.data.defaultModel;
+  }
   if (Array.isArray(profile.data?.authModels) && profile.data.authModels.length) {
     state.modelOptions = profile.data.authModels;
   }

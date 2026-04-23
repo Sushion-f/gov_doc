@@ -18,7 +18,8 @@ from app.compression import (
     summarize_memory_for_context,
     truncate_tool_results,
 )
-from app.runtime import _execution_step_waves
+from app.runtime import _execution_step_waves, _expand_effective_goal, _normalize_artifact_contract
+from agents.main_agent import MainAgent
 
 
 class TestCompressionHelpers(unittest.TestCase):
@@ -89,6 +90,54 @@ class TestExecutionStepWaves(unittest.TestCase):
         waves = _execution_step_waves([a, b])
         self.assertEqual(len(waves), 1)
         self.assertEqual(len(waves[0]), 2)
+
+
+class TestRuntimeContracts(unittest.TestCase):
+    def test_expand_effective_goal_for_regenerate(self) -> None:
+        goal, mode = _expand_effective_goal(
+            "重新生成",
+            {
+                "intentType": "regenerate",
+                "rewriteMode": "regenerate",
+                "baseUserGoal": "起草一份国庆放假通知",
+                "latestAssistantSummary": "已生成一版国庆放假通知草稿。",
+                "latestArtifactRefs": [{"title": "公文写作结果.docx", "workspaceNodeId": "node_1"}],
+            },
+        )
+        self.assertEqual(mode, "regenerate")
+        self.assertIn("原始用户目标：起草一份国庆放假通知", goal)
+        self.assertIn("最近一次结果摘要", goal)
+        self.assertIn("公文写作结果.docx", goal)
+
+    def test_normalize_artifact_contract_uses_camel_case(self) -> None:
+        payload = _normalize_artifact_contract(
+            {
+                "artifact_type": "document",
+                "content_html": "<p>正文</p>",
+                "source_skill": "writing",
+                "source_state": "model_success",
+            }
+        )
+        self.assertEqual(payload["artifactType"], "document")
+        self.assertEqual(payload["contentHtml"], "<p>正文</p>")
+        self.assertEqual(payload["sourceSkill"], "writing")
+        self.assertEqual(payload["sourceState"], "model_success")
+
+
+class TestMainAgentHeuristics(unittest.TestCase):
+    def test_simple_writing_shortcut_when_no_retrieval_needed(self) -> None:
+        agent = MainAgent()
+        self.assertTrue(
+            agent._should_shortcut_simple_writing(
+                "起草一份通知，不需要检索，直接生成国庆放假通知",
+                None,
+                [],
+            )
+        )
+
+    def test_no_shortcut_for_empty_message(self) -> None:
+        agent = MainAgent()
+        self.assertFalse(agent._should_shortcut_simple_writing("", None, []))
 
 
 if __name__ == "__main__":

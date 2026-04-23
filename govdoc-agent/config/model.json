@@ -13,5 +13,12 @@
     "planner_model": "",
     "planner_temperature": 0.1,
     "planner_max_steps": 5
+  },
+  "context": {
+    "window_tokens": 128000,
+    "compact_trigger_ratio": 0.75,
+    "compact_target_ratio": 0.4,
+    "keep_recent_messages": 6,
+    "summary_max_chars": 4000
   }
 }

@@ -5,10 +5,11 @@ from collections.abc import Callable
 from typing import Any
 
 from .registry import AgentRegistry, canonical_agent_name, get_agent_spec
-from app.a2a_runtime import ExecutionPlan, ExecutionStep, build_execution_plan as build_fallback_execution_plan
+from app.a2a_runtime import ExecutionPlan, build_execution_plan as build_fallback_execution_plan
 from app.config import settings
 from app.debug_log import log_stage
 from app.llm import LLMCallError, call_chat_model_with_messages_raw
+from app.skills import MemoryToolset, WorkspaceCliToolset
 from tools.agent_tool import AgentTool
 
 
@@ -16,6 +17,8 @@ class MainAgent:
     def __init__(self) -> None:
         self.registry = AgentRegistry
         self.agent_tool = AgentTool()
+        self.workspace_cli = WorkspaceCliToolset()
+        self.memory_tools = MemoryToolset()
 
     def plan(
         self,
@@ -49,47 +52,35 @@ class MainAgent:
             }
 
         messages = self._build_messages(user_message, attachments, runtime_context, memory_context)
-        tool_schema = self.agent_tool.get_tool_schema()
+        tool_schemas = self._tool_schemas()
         log_stage(
             "planner.request",
             {
                 "requestedModel": settings.planner_model or requested_model,
                 "messages": messages,
-                "toolSchema": tool_schema,
+                "toolSchema": tool_schemas,
             },
             enabled=settings.debug_runtime_logs,
             max_chars=settings.debug_log_max_chars,
             max_string_chars=settings.debug_log_max_string_chars,
         )
         try:
-            use_stream = on_planner_stream is not None
-
-            def _stream_cb(ev: dict[str, Any]) -> None:
-                if on_planner_stream:
-                    on_planner_stream(ev)
-
-            response = call_chat_model_with_messages_raw(
+            response, planner_cli_events, inline_outcomes, inline_artifacts = self._run_planner_tool_loop(
                 messages,
-                settings.planner_model or requested_model,
-                purpose="planner",
-                temperature=settings.planner_temperature,
-                extra_payload={
-                    "tools": [tool_schema],
-                    "tool_choice": "auto",
-                },
-                stream=use_stream,
-                on_stream_event=_stream_cb if use_stream else None,
+                requested_model,
+                runtime_context,
+                attachments=attachments,
+                memory_context=memory_context,
+                on_planner_stream=on_planner_stream,
             )
-            message = response.get("message") or {}
-            if on_planner_stream:
-                on_planner_stream(
-                    {
-                        "reasoning": self._message_reasoning(message),
-                        "text": self._message_text(message),
-                        "flush": True,
-                    }
-                )
-            plan, planner_meta = self._plan_from_response(user_message, response, attachments)
+            plan, planner_meta = self._plan_from_response(
+                user_message,
+                response,
+                attachments,
+                planner_cli_events=planner_cli_events,
+                inline_outcomes=inline_outcomes,
+                inline_artifacts=inline_artifacts,
+            )
             log_stage(
                 "planner.response",
                 {
@@ -149,14 +140,14 @@ class MainAgent:
         stream: bool = False,
     ) -> dict[str, Any]:
         """Leader 闭环：在完整 messages（含 tool 结果）上再调一次 Planner 模型以决策下一步。"""
-        tool_schema = self.agent_tool.get_tool_schema()
+        tool_schemas = self._tool_schemas()
         return call_chat_model_with_messages_raw(
             messages,
             settings.planner_model or requested_model,
             purpose="leader_step",
             temperature=settings.planner_temperature,
             extra_payload={
-                "tools": [tool_schema],
+                "tools": tool_schemas,
                 "tool_choice": "auto",
             },
             stream=stream,
@@ -218,59 +209,286 @@ class MainAgent:
         ]
 
     def _build_main_system_prompt(self) -> str:
-        prompt = get_agent_spec("general").prompt_path.parent.parent / "main_system.md"
-        base = prompt.read_text(encoding="utf-8").strip()
+        prompts_root = get_agent_spec("general").prompt_path.parent.parent
+        lead_path = prompts_root / "LEAD.md"
+        legacy_path = prompts_root / "main_system.md"
+        prompt_path = lead_path if lead_path.exists() else legacy_path
+        base = prompt_path.read_text(encoding="utf-8").strip()
         return base.replace("{{AGENT_REGISTRY_CONTEXT}}", self.registry.to_prompt_context())
+
+    def _tool_schemas(self) -> list[dict[str, Any]]:
+        return [
+            self.agent_tool.get_tool_schema(),
+            *self.workspace_cli.tool_schemas(),
+            *self.memory_tools.tool_schemas(),
+        ]
+
+    def _call_planner_model(
+        self,
+        messages: list[dict[str, Any]],
+        requested_model: str | None,
+        *,
+        purpose: str,
+        on_planner_stream: Callable[[dict[str, Any]], None] | None = None,
+    ) -> dict[str, Any]:
+        use_stream = on_planner_stream is not None
+
+        def _stream_cb(ev: dict[str, Any]) -> None:
+            if on_planner_stream:
+                on_planner_stream(ev)
+
+        response = call_chat_model_with_messages_raw(
+            messages,
+            settings.planner_model or requested_model,
+            purpose=purpose,
+            temperature=settings.planner_temperature,
+            extra_payload={
+                "tools": self._tool_schemas(),
+                "tool_choice": "auto",
+            },
+            stream=use_stream,
+            on_stream_event=_stream_cb if use_stream else None,
+        )
+        message = response.get("message") or {}
+        if on_planner_stream:
+            on_planner_stream(
+                {
+                    "reasoning": self._message_reasoning(message),
+                    "text": self._message_text(message),
+                    "flush": True,
+                }
+            )
+        return response
+
+    def _run_planner_tool_loop(
+        self,
+        messages: list[dict[str, Any]],
+        requested_model: str | None,
+        runtime_context: dict[str, Any] | None,
+        *,
+        attachments: list[dict[str, Any]] | None = None,
+        memory_context: dict | None = None,
+        on_planner_stream: Callable[[dict[str, Any]], None] | None = None,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+        """Flat agent loop：所有工具调用（workspace.* / memory.* / dispatch_sub_agent）
+        都在同一循环中执行并把结构化 tool_result 回灌给模型，直到模型不再发起
+        tool_calls 或达到 ``settings.planner_max_tool_rounds``。
+        """
+        cli_events: list[dict[str, Any]] = []
+        inline_outcomes: list[dict[str, Any]] = []
+        inline_artifacts: list[dict[str, Any]] = []
+        attachments = attachments or []
+
+        response = self._call_planner_model(
+            messages,
+            requested_model,
+            purpose="planner",
+            on_planner_stream=on_planner_stream,
+        )
+        max_rounds = max(1, int(settings.planner_max_tool_rounds or 1))
+        for round_index in range(max_rounds):
+            message = response.get("message") or {}
+            tool_calls = message.get("tool_calls") or []
+            if not tool_calls:
+                return response, cli_events, inline_outcomes, inline_artifacts
+
+            tool_messages: list[dict[str, Any]] = []
+            for tool_call in tool_calls:
+                function = tool_call.get("function") or {}
+                name = function.get("name") or ""
+                arguments = json.loads(function.get("arguments") or "{}")
+                if name.startswith("workspace."):
+                    execution = self.workspace_cli.execute(name, arguments, runtime_context)
+                    cli_events.append(execution.runtime_event())
+                    tool_messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tool_call["id"],
+                            "content": json.dumps(execution.tool_message(), ensure_ascii=False),
+                        }
+                    )
+                    continue
+                if name.startswith("memory."):
+                    execution = self.memory_tools.execute(name, arguments, runtime_context)
+                    cli_events.append(execution.runtime_event())
+                    tool_messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tool_call["id"],
+                            "content": json.dumps(execution.tool_message(), ensure_ascii=False),
+                        }
+                    )
+                    continue
+                if name == self.agent_tool.tool_name:
+                    tool_result = self.agent_tool.execute(
+                        arguments,
+                        requested_model=requested_model,
+                        attachments=attachments,
+                        cookies=(runtime_context or {}).get("cookies"),
+                        runtime_context=runtime_context,
+                        memory_context=memory_context,
+                        task_packet=(runtime_context or {}).get("task_packet"),
+                    )
+                    outcome_index = len(inline_outcomes) + 1
+                    skill_result = tool_result.pop("_skill_execution_result", None)
+                    outcome = self._inline_outcome_from_tool_result(
+                        index=outcome_index,
+                        arguments=arguments,
+                        tool_result=tool_result,
+                        skill_result=skill_result,
+                        requested_model=requested_model or "",
+                    )
+                    inline_outcomes.append(outcome)
+                    if skill_result is not None:
+                        inline_artifacts.extend(skill_result.artifact_refs or [])
+                    compact_payload = {
+                        "agent": tool_result.get("agent"),
+                        "status": tool_result.get("status"),
+                        "summary": tool_result.get("summary"),
+                        "artifacts": tool_result.get("artifacts"),
+                        "citations": tool_result.get("citations"),
+                    }
+                    tool_messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tool_call["id"],
+                            "content": json.dumps(compact_payload, ensure_ascii=False),
+                        }
+                    )
+                    continue
+                tool_messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call["id"],
+                        "content": json.dumps(
+                            {"status": "error", "error": f"unsupported_tool:{name}"},
+                            ensure_ascii=False,
+                        ),
+                    }
+                )
+
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": self._message_text(message) or None,
+                    "tool_calls": tool_calls,
+                }
+            )
+            messages.extend(tool_messages)
+            response = self._call_planner_model(
+                messages,
+                requested_model,
+                purpose=f"planner_tool_round_{round_index + 2}",
+                on_planner_stream=on_planner_stream,
+            )
+        log_stage(
+            "planner.max_rounds_reached",
+            {"maxRounds": max_rounds, "inlineOutcomes": len(inline_outcomes)},
+            enabled=settings.debug_runtime_logs,
+            max_chars=settings.debug_log_max_chars,
+            max_string_chars=settings.debug_log_max_string_chars,
+        )
+        return response, cli_events, inline_outcomes, inline_artifacts
+
+    def _inline_outcome_from_tool_result(
+        self,
+        *,
+        index: int,
+        arguments: dict[str, Any],
+        tool_result: dict[str, Any],
+        skill_result: Any,
+        requested_model: str,
+    ) -> dict[str, Any]:
+        from app.a2a_runtime import title_for_skill
+        from app.agent_capability_adapter import render_assistant_html
+
+        agent_name = tool_result.get("agent") or arguments.get("agent_name") or "general"
+        status = tool_result.get("status") or "ok"
+        summary_text = tool_result.get("summary") or ""
+        text_payload = tool_result.get("text") or summary_text
+        normalized_result = {}
+        annotations = []
+        retryable = False
+        source_state = "model_success"
+        error_detail = tool_result.get("error")
+        reasoning_content = None
+        html = ""
+        if skill_result is not None:
+            normalized_result = skill_result.normalized_result or {}
+            annotations = skill_result.editor_annotations or []
+            retryable = bool(skill_result.retryable)
+            source_state = skill_result.source_state or "model_success"
+            error_detail = skill_result.error_detail or error_detail
+            reasoning_content = skill_result.reasoning_content
+            try:
+                html = render_assistant_html(agent_name, skill_result, requested_model)
+            except Exception:  # pragma: no cover
+                html = ""
+        else:
+            normalized_result = {"summary": summary_text, "text": text_payload}
+            if status == "error":
+                source_state = "model_error"
+        return {
+            "index": index,
+            "task_id": f"inline_{index:02d}_{agent_name}",
+            "skill_name": agent_name,
+            "title": title_for_skill(agent_name),
+            "summary": summary_text or title_for_skill(agent_name),
+            "html": html,
+            "normalized_result": normalized_result,
+            "annotations": annotations,
+            "retryable": retryable,
+            "source_state": source_state,
+            "error_detail": error_detail,
+            "reasoning_content": reasoning_content,
+            "inline": True,
+        }
 
     def _plan_from_response(
         self,
         user_message: str,
         response: dict[str, Any],
         attachments: list[dict[str, Any]],
+        planner_cli_events: list[dict[str, Any]] | None = None,
+        inline_outcomes: list[dict[str, Any]] | None = None,
+        inline_artifacts: list[dict[str, Any]] | None = None,
     ) -> tuple[ExecutionPlan, dict[str, Any]]:
+        """Flat loop 下 `tool_calls` 已在 `_run_planner_tool_loop` 内执行并回灌，
+        本函数只需要把 loop 尾巴的 assistant text / inline outcomes 映射成外层
+        runtime 需要的 ExecutionPlan 语义——当有 inline outcomes 时返回 direct_plan
+        （空 steps），通过 `planner_meta` 携带 outcomes，让 runtime 跳过旧的
+        `ExecutionPlan.steps` 迭代逻辑。
+        """
         message = response.get("message") or {}
-        tool_calls = message.get("tool_calls") or []
         assistant_text = self._message_text(message).strip()
         reasoning_content = self._message_reasoning(message).strip()
-        if tool_calls:
-            steps: list[ExecutionStep] = []
-            previous_step_ids: list[str] = []
-            for index, tool_call in enumerate(tool_calls, start=1):
-                function = tool_call.get("function") or {}
-                if function.get("name") != self.agent_tool.tool_name:
-                    continue
-                arguments = json.loads(function.get("arguments") or "{}")
-                step = self.agent_tool.to_execution_step(
-                    arguments,
-                    index=index,
-                    previous_step_ids=previous_step_ids,
-                )
-                steps.append(step)
-                previous_step_ids.append(f"step_{index:02d}_{step.skill_name}")
-            if not steps:
-                raise ValueError("主 Agent 返回了空的 sub-agent 调度计划")
-            steps, normalization = self._normalize_document_steps(user_message, steps, reasoning_content)
-            summary = assistant_text or f"主 Agent 已规划 {len(steps)} 个 sub-agent 步骤。"
+        direct_plan = build_fallback_execution_plan(user_message, None, attachments)
+        inline_outcomes = inline_outcomes or []
+        inline_artifacts = inline_artifacts or []
+
+        if inline_outcomes:
+            summary = (
+                assistant_text
+                or f"主 Agent 内联执行了 {len(inline_outcomes)} 个子 agent，已汇总结果。"
+            )
+            direct_plan.summary = summary
             return (
-                ExecutionPlan(
-                    intent="document_workflow",
-                    summary=summary,
-                    steps=steps,
-                ),
+                direct_plan,
                 {
-                    "planner": "main_agent_tool_calls",
+                    "planner": "main_agent_flat_loop",
                     "fallback": False,
-                    "dispatchMode": "tool_call_dispatch",
+                    "dispatchMode": "flat_tool_loop",
                     "modelName": response["model_name"],
-                    "toolCalls": tool_calls,
+                    "plannerCliEvents": planner_cli_events or [],
                     "assistantText": assistant_text,
                     "reasoningContent": reasoning_content,
-                    "normalization": normalization,
+                    "directAnswer": assistant_text,
+                    "inlineStepOutcomes": inline_outcomes,
+                    "inlineArtifacts": inline_artifacts,
                     "raw": response["raw"],
                 },
             )
 
-        direct_plan = build_fallback_execution_plan(user_message, None, attachments)
         summary = assistant_text or "主 Agent 直接回答当前问题，无需调度 sub agent。"
         direct_plan.summary = summary
         return (
@@ -280,6 +498,7 @@ class MainAgent:
                 "fallback": False,
                 "dispatchMode": "main_agent_direct",
                 "modelName": response["model_name"],
+                "plannerCliEvents": planner_cli_events or [],
                 "assistantText": assistant_text,
                 "reasoningContent": reasoning_content,
                 "directAnswer": assistant_text,
@@ -313,69 +532,3 @@ class MainAgent:
             )
         return ""
 
-    @staticmethod
-    def _looks_like_writing_request(user_message: str) -> bool:
-        text = (user_message or "").strip()
-        if not text:
-            return False
-        strong_markers = (
-            "不是只检索",
-            "帮我写",
-            "写一篇",
-            "起草",
-            "撰写",
-            "生成",
-        )
-        doc_markers = (
-            "报告",
-            "通知",
-            "方案",
-            "请示",
-            "总结",
-            "汇报",
-            "发言稿",
-            "讲话稿",
-            "公文",
-            "正文",
-        )
-        return any(marker in text for marker in strong_markers) or (
-            any(marker in text for marker in ("写", "起草", "撰写", "生成"))
-            and any(marker in text for marker in doc_markers)
-        )
-
-    def _normalize_document_steps(
-        self,
-        user_message: str,
-        steps: list[ExecutionStep],
-        reasoning_content: str = "",
-    ) -> tuple[list[ExecutionStep], dict[str, Any] | None]:
-        if not steps or not self._looks_like_writing_request(user_message):
-            return steps, None
-        if any(step.skill_name == "writing" for step in steps):
-            return steps, None
-        if not any(step.skill_name == "retrieval" for step in steps):
-            return steps, None
-
-        writing_spec = get_agent_spec("writing")
-        depends_on = [f"step_{steps[-1].index:02d}_{steps[-1].skill_name}"]
-        normalized_steps = list(steps)
-        normalized_steps.append(
-            ExecutionStep(
-                index=len(normalized_steps) + 1,
-                skill_name=writing_spec.name,
-                title=writing_spec.title,
-                objective=(
-                    "根据前序检索结果与用户需求，起草完整公文正文；"
-                    "若用户明确要求的是报告，则输出报告草稿。"
-                ),
-                scope=writing_spec.scope,
-                depends_on=depends_on,
-                subtask_role=writing_spec.default_subtask_role,
-            )
-        )
-        return normalized_steps, {
-            "type": "append_writing_after_retrieval",
-            "reason": "user_requires_document_draft",
-            "dependsOn": depends_on,
-            "reasoningMentionsWriting": "writing" in reasoning_content.lower() or "写" in reasoning_content,
-        }

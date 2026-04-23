@@ -43,7 +43,24 @@ LLM 网关地址、API Key、默认模型、超时、Planner、可选模型列�
 
 默认健康检查接口为 `GET /api/agentloop/health`。
 
-Detailed runtime logs are enabled by default and will print to both the terminal and `runtime_logs/govdoc_agent.log`.
+Detailed runtime logs are enabled by default and are **split into two files** under `runtime_logs/`:
+
+- `backend.log` — 后端调用日志（runtime / planner / routes / storage / workspace 等所有非 LLM stage 的 `log_stage` 输出）
+- `model.log`   — 模型调用日志（`llm.request.*` / `llm.response.*` / `llm.error.*`；**流式输出会在整个流结束后以单条 `llm.response.{purpose}` 聚合块写入**，不会 per-chunk 刷屏）
+
+`runtime_logs/govdoc_agent.log` 仍然保留，作为 uvicorn 自己的 stdout/stderr 汇总文件；需要跟踪 debug 行可直接使用 `./scripts/watch_agentic_loop_logs.sh`（同时 tail backend + model）或加参数 `backend` / `model` 单看一路。
+
+可用环境变量：
+
+| 变量 | 作用 | 默认值 |
+| --- | --- | --- |
+| `NEW_APP_BACKEND_LOG_PATH` | 后端调用日志文件路径 | `runtime_logs/backend.log` |
+| `NEW_APP_MODEL_LOG_PATH` | 模型调用日志文件路径 | `runtime_logs/model.log` |
+| `NEW_APP_LOG_FILE_MAX_BYTES` | 单文件滚动上限（字节） | `20971520` (20MB) |
+| `NEW_APP_LOG_FILE_BACKUP_COUNT` | 历史文件保留份数 | `5` |
+| `NEW_APP_LOG_STAGE_ECHO_STDOUT` | 是否同时把 `log_stage` 回显到 stdout | `false` |
+| `NEW_APP_DEBUG_RUNTIME_LOGS` | 总开关，关掉后上述所有 debug 行都不输出 | `true` |
+| `NEW_APP_DEBUG_LOG_STYLE` | `summary`：汇总输入/汇总输出的人类可读块（默认）；`json`：整条缩进 JSON（旧版） | `summary` |
 
 If you want to watch the full request/context/model trace directly in your terminal, use foreground mode:
 

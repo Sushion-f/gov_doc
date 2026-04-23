@@ -55,12 +55,24 @@ class TaskEvent(BaseModel):
     parent_task_id: str | None = None
     seq_no: int
     event_type: Literal[
-        "created",
-        "running",
+        "message_created",
+        "message_delta",
+        "message_final",
+        "planner_reasoning_delta",
+        "planner_plan",
+        "agent_invoke",
+        "skill_invoke",
         "tool_call",
+        "cli_exec",
+        "search",
+        "context_usage",
+        "context_compacted",
+        "artifact_created",
+        "artifact_updated",
         "waiting_user",
         "completed",
-        "failed",
+        "error",
+        "aborted",
     ]
     status: str
     title: str
@@ -81,6 +93,128 @@ class WorkspaceArtifactRef(BaseModel):
     content_html: str | None = None
     version_no: int | None = None
     source_run_id: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Assistant Content Block 协议（对齐 Claude Agent SDK 的 content[] block 设计）。
+# assistant 消息的权威数据源是 content_blocks_json，由扁平 tool-call loop 驱动。
+# ---------------------------------------------------------------------------
+
+
+class BaseContentBlock(BaseModel):
+    """所有 assistant 内容 block 的公共头。子类通过 type 字段判别。"""
+
+    id: str | None = None
+    created_at: datetime | None = None
+
+
+class ThinkingBlock(BaseContentBlock):
+    type: Literal["thinking"] = "thinking"
+    thinking: str
+    signature: str | None = None
+
+
+class TextBlock(BaseContentBlock):
+    type: Literal["text"] = "text"
+    text: str
+
+
+class ToolUseBlock(BaseContentBlock):
+    """模型发起的一次工具调用（dispatch_sub_agent / workspace.* / memory.* 等）。"""
+
+    type: Literal["tool_use"] = "tool_use"
+    tool_use_id: str
+    name: str
+    input: dict[str, Any] = Field(default_factory=dict)
+    status: Literal["running", "ok", "error"] = "running"
+
+
+class ToolResultInnerText(BaseModel):
+    type: Literal["text"] = "text"
+    text: str
+
+
+class ToolResultInnerArtifactRef(BaseModel):
+    type: Literal["artifact_ref"] = "artifact_ref"
+    artifact_id: str
+    title: str | None = None
+    version: int | None = None
+    workspace_node_id: str | None = None
+
+
+class ToolResultInnerError(BaseModel):
+    type: Literal["error"] = "error"
+    message: str
+    code: str | None = None
+
+
+class ToolResultBlock(BaseContentBlock):
+    """某个 tool_use 的返回值，content 只允许嵌套 text/artifact_ref/error。"""
+
+    type: Literal["tool_result"] = "tool_result"
+    tool_use_id: str
+    is_error: bool = False
+    content: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class ArtifactRefBlock(BaseContentBlock):
+    type: Literal["artifact_ref"] = "artifact_ref"
+    artifact_id: str
+    title: str
+    version: int | None = None
+    workspace_node_id: str | None = None
+    summary: str | None = None
+
+
+class TodoListItem(BaseModel):
+    id: str
+    text: str
+    status: Literal["pending", "in_progress", "completed", "cancelled"] = "pending"
+    priority: Literal["low", "normal", "high"] | None = None
+
+
+class TodoListBlock(BaseContentBlock):
+    type: Literal["todo_list"] = "todo_list"
+    items: list[TodoListItem] = Field(default_factory=list)
+
+
+class WaitingUserBlock(BaseContentBlock):
+    type: Literal["waiting_user"] = "waiting_user"
+    prompt_menu: dict[str, Any] = Field(default_factory=dict)
+
+
+class ContextNoticeBlock(BaseContentBlock):
+    type: Literal["context_notice"] = "context_notice"
+    kind: Literal["compact", "usage"] = "usage"
+    before: dict[str, Any] | None = None
+    after: dict[str, Any] | None = None
+    summary: str | None = None
+
+
+ASSISTANT_CONTENT_BLOCK_TYPES: tuple[str, ...] = (
+    "thinking",
+    "text",
+    "tool_use",
+    "tool_result",
+    "artifact_ref",
+    "todo_list",
+    "waiting_user",
+    "context_notice",
+)
+
+
+# 注意：Pydantic v2 discriminated union 写法对 schema 输出更干净；
+# 这里仅作为内部验证工具，默认只在 build/parse 边界调用。
+AssistantContentBlock = (
+    ThinkingBlock
+    | TextBlock
+    | ToolUseBlock
+    | ToolResultBlock
+    | ArtifactRefBlock
+    | TodoListBlock
+    | WaitingUserBlock
+    | ContextNoticeBlock
+)
 
 
 class SkillAdapterResult(BaseModel):
@@ -122,11 +256,35 @@ class ConversationRenameRequest(BaseModel):
     pinned: bool | None = None
 
 
+class ArtifactRefPayload(BaseModel):
+    id: str | None = None
+    artifactType: str | None = None
+    title: str | None = None
+    summary: str | None = None
+    contentHtml: str | None = None
+    workspaceNodeId: str | None = None
+    relativePath: str | None = None
+    versionPath: str | None = None
+    sourceSkill: str | None = None
+    sourceState: str | None = None
+    status: str | None = None
+    errorDetail: str | None = None
+
+
+class OperationContextPayload(BaseModel):
+    intentType: str | None = None
+    rewriteMode: str | None = None
+    baseUserGoal: str | None = None
+    latestAssistantSummary: str | None = None
+    latestArtifactRefs: list[ArtifactRefPayload] = Field(default_factory=list)
+
+
 class ConversationRunRequest(BaseModel):
     content: str
     model: str | None = None
     skill: str | None = None
     attachments: list[dict[str, Any]] = Field(default_factory=list)
+    operation_context: OperationContextPayload | None = None
     resume_from_waiting: bool = False
     selected_option: str | None = None
     prompt_menu_input: str | None = None
@@ -177,4 +335,3 @@ class DictionaryEntryCreateRequest(BaseModel):
     dict_type: Literal["whiteList", "blackList"]
     word: str
     notes: str | None = None
-

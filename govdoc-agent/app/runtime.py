@@ -35,7 +35,15 @@ from .compression import (
     estimate_tokens,
     summarize_memory_for_context,
 )
+from .content_blocks import (
+    build_assistant_blocks,
+    blocks_to_plain_text,
+    blocks_to_snapshot_html,
+    build_context_notice_block,
+    build_text_block,
+)
 from .config import settings
+from .context_usage import get_usage as get_api_usage, record_usage as record_api_usage
 from .debug_log import log_stage, mask_cookie
 from .models import (
     V4CompressionSnapshot,
@@ -47,7 +55,6 @@ from .models import (
     V4UserProfile,
     V4WorkspaceAttachmentLink,
     V4WorkspaceNode,
-    V4WorkspaceVersion,
 )
 from .planner import build_model_execution_plan
 from agents.main_agent import MainAgent
@@ -57,12 +64,18 @@ from .agent_capability_adapter import (
     render_assistant_html,
 )
 from .storage import (
+    build_docx_bytes,
     clear_user_memory_subdir,
+    ensure_unique_workspace_path,
+    html_to_plain_text,
+    parse_workspace_file,
     read_user_doc,
+    resolve_writable_file_path,
+    write_workspace_bytes,
     write_memory_doc,
     write_workspace_version,
 )
-from .llm import text_to_html
+from .llm import LLMCallError, call_chat_model_with_messages, text_to_html
 from tools.agent_tool import AgentTool
 
 
@@ -88,6 +101,10 @@ GENERIC_ASSISTANT_CONTENTS = {
     "任务未执行",
     "执行失败",
 }
+TITLE_SUMMARY_INTERVAL = 4
+TITLE_SUMMARY_MAX_MESSAGES = 10
+WRITING_DOC_MARKERS = ("通知", "报告", "请示", "函", "通报", "公告", "公报", "决定", "纪要", "方案", "讲话稿", "发言稿")
+WRITING_ACTION_MARKERS = ("写", "起草", "撰写", "生成", "拟写", "草拟")
 
 
 class TaskRegistry:
@@ -107,6 +124,15 @@ def clip_title(text: str) -> str:
     return (text or "新对话").strip()[:24] or "新对话"
 
 
+def normalize_conversation_title(text: str) -> str:
+    cleaned = re.sub(r"[\r\n\t]+", " ", (text or "").strip())
+    cleaned = re.sub(r"[\"'“”‘’《》【】\[\](){}:：;；,.，。!?！？]+", "", cleaned)
+    cleaned = re.sub(r"\s+", "", cleaned)
+    if not cleaned:
+        return ""
+    return cleaned[:14]
+
+
 def _json(value) -> str:
     return json.dumps(value, ensure_ascii=False)
 
@@ -118,6 +144,230 @@ def _loads(value: str | None, fallback):
         return json.loads(value)
     except json.JSONDecodeError:
         return fallback
+
+
+def _trim_snippet(value: str | None, limit: int = 320) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "…"
+
+
+def _looks_like_document_request(text: str | None) -> bool:
+    content = str(text or "").strip()
+    if not content:
+        return False
+    return any(marker in content for marker in WRITING_DOC_MARKERS) and any(
+        marker in content for marker in WRITING_ACTION_MARKERS
+    )
+
+
+def _needs_writing_brief(text: str | None) -> bool:
+    content = re.sub(r"\s+", "", str(text or ""))
+    if not content:
+        return True
+    generic_patterns = [
+        r"^(写|起草|生成|撰写)(一份|一个|一篇)?(通知|报告|请示|方案|总结|汇报|讲话稿|发言稿|公文)$",
+        r"^(帮我)?(写|起草|生成)(个|一份)?(通知|报告|请示|方案)$",
+    ]
+    if any(re.match(pattern, content) for pattern in generic_patterns):
+        return True
+    return len(content) <= 8 and any(marker in content for marker in WRITING_DOC_MARKERS)
+
+
+def _needs_retrieval_brief(text: str | None) -> bool:
+    content = re.sub(r"\s+", "", str(text or ""))
+    if not content:
+        return True
+    generic_patterns = [
+        r"^(搜一下|查一下|检索一下|帮我搜索|帮我检索)$",
+        r"^(搜|查|检索)(资料|文件|政策|内容)?$",
+    ]
+    return any(re.match(pattern, content) for pattern in generic_patterns)
+
+
+def _build_main_agent_prompt_menu(
+    plan: ExecutionPlan,
+    effective_goal: str,
+    attachments: list[dict] | None,
+) -> dict | None:
+    missing_items: list[str] = []
+    step_skills = [step.skill_name for step in plan.steps]
+    text = str(effective_goal or "").strip()
+    if "writing" in step_skills and _needs_writing_brief(text):
+        missing_items.append("请补充要写的文种、主题或对象，例如“国庆放假通知”“营商环境整改报告”。")
+    if "retrieval" in step_skills and _needs_retrieval_brief(text):
+        missing_items.append("请补充检索主题、关键词或范围，例如政策方向、时间范围、目标单位。")
+    if any(skill in step_skills for skill in {"review", "dedup", "layout"}) and not (attachments or []):
+        short_text = len(re.sub(r"\s+", "", text))
+        if short_text < 40:
+            missing_items.append("请提供要处理的正文，或先上传待审核/查重/排版的文件。")
+    if not missing_items:
+        return None
+    question = "为了避免后续多个子智能体分别追问，请先一次性补充以下关键信息：\n" + "\n".join(
+        f"{index}. {item}" for index, item in enumerate(missing_items, start=1)
+    )
+    return {
+        "type": "clarification",
+        "title": "Main Agent 需要补充信息",
+        "description": question,
+        "question": question,
+        "options": [
+            {"key": "custom_input", "label": "补充信息", "recommended": True},
+        ],
+        "resumeMode": "prompt_menu_choice",
+        "missingItems": missing_items,
+    }
+
+
+def _normalize_operation_context(operation_context: dict | None) -> dict:
+    raw = operation_context if isinstance(operation_context, dict) else {}
+    latest_refs = []
+    for item in raw.get("latestArtifactRefs") or []:
+        if not isinstance(item, dict):
+            continue
+        latest_refs.append(
+            {
+                "id": item.get("id"),
+                "artifactType": item.get("artifactType"),
+                "title": item.get("title"),
+                "summary": item.get("summary"),
+                "contentHtml": item.get("contentHtml"),
+                "workspaceNodeId": item.get("workspaceNodeId"),
+                "relativePath": item.get("relativePath"),
+                "versionPath": item.get("versionPath"),
+                "sourceSkill": item.get("sourceSkill"),
+                "sourceState": item.get("sourceState"),
+                "status": item.get("status"),
+                "errorDetail": item.get("errorDetail"),
+            }
+        )
+    return {
+        "intentType": str(raw.get("intentType") or "").strip() or None,
+        "rewriteMode": str(raw.get("rewriteMode") or "").strip() or None,
+        "baseUserGoal": str(raw.get("baseUserGoal") or "").strip() or None,
+        "latestAssistantSummary": str(raw.get("latestAssistantSummary") or "").strip() or None,
+        "latestArtifactRefs": latest_refs,
+    }
+
+
+def _expand_effective_goal(content: str, operation_context: dict | None) -> tuple[str, str | None]:
+    normalized = _normalize_operation_context(operation_context)
+    base_goal = normalized.get("baseUserGoal") or (content or "").strip()
+    rewrite_mode = normalized.get("rewriteMode") or normalized.get("intentType")
+    latest_summary = normalized.get("latestAssistantSummary") or ""
+    latest_refs = normalized.get("latestArtifactRefs") or []
+    if not rewrite_mode:
+        return base_goal, None
+
+    mode_label = {
+        "regenerate": "重生成",
+        "rewrite": "改写",
+        "continue": "续写",
+        "polish": "润色",
+    }.get(rewrite_mode, rewrite_mode)
+    lines = [
+        f"当前动作：{mode_label}",
+        f"原始用户目标：{base_goal}",
+    ]
+    if latest_summary:
+        lines.extend(["最近一次结果摘要：", latest_summary])
+    if latest_refs:
+        lines.append("最近一次交付物引用：")
+        for item in latest_refs[:3]:
+            title = item.get("title") or "未命名交付物"
+            summary = item.get("summary") or ""
+            node_id = item.get("workspaceNodeId") or ""
+            lines.append(f"- {title}" + (f" | {summary}" if summary else "") + (f" | node={node_id}" if node_id else ""))
+    lines.append("请基于以上上下文继续完成当前写作任务；缺少非核心信息时请使用占位符，不要转而要求用户补充。")
+    return "\n".join(lines).strip(), rewrite_mode
+
+
+def _normalize_artifact_contract(
+    artifact: dict | None,
+    *,
+    default_source_skill: str | None = None,
+    default_source_state: str | None = None,
+    default_status: str = "ready",
+    error_detail: str | None = None,
+) -> dict:
+    payload = dict(artifact or {})
+    return {
+        "id": payload.get("id"),
+        "artifactType": payload.get("artifactType") or payload.get("artifact_type") or "document",
+        "title": payload.get("title") or "未命名产物",
+        "summary": payload.get("summary"),
+        "contentHtml": payload.get("contentHtml") or payload.get("content_html"),
+        "workspaceNodeId": payload.get("workspaceNodeId") or payload.get("workspace_node_id"),
+        "relativePath": payload.get("relativePath") or payload.get("relative_path"),
+        "versionPath": payload.get("versionPath") or payload.get("version_path"),
+        "sourceSkill": payload.get("sourceSkill") or payload.get("source_skill") or default_source_skill,
+        "sourceState": payload.get("sourceState") or payload.get("source_state") or default_source_state,
+        "status": payload.get("status") or default_status,
+        "errorDetail": payload.get("errorDetail") or payload.get("error_detail") or error_detail,
+    }
+
+
+def _artifact_contract_from_record(artifact: V4ConversationArtifact) -> dict:
+    meta = _loads(artifact.meta_json, {})
+    return _normalize_artifact_contract(
+        {
+            "id": artifact.id,
+            "artifactType": artifact.artifact_type,
+            "title": artifact.title,
+            "summary": artifact.summary,
+            "contentHtml": artifact.content_html,
+            "workspaceNodeId": artifact.workspace_node_id,
+            "relativePath": meta.get("relativePath"),
+            "versionPath": meta.get("versionPath"),
+            "sourceSkill": meta.get("sourceSkill"),
+            "sourceState": meta.get("sourceState"),
+            "status": meta.get("status") or "ready",
+            "errorDetail": meta.get("errorDetail"),
+        }
+    )
+
+
+def _artifact_ref_payloads(artifacts: list[V4ConversationArtifact]) -> list[dict]:
+    return [_artifact_contract_from_record(item) for item in artifacts]
+
+
+def _build_attachment_context(db: Session, current_user, attachments: list[dict] | None) -> list[dict]:
+    contexts: list[dict] = []
+    for item in attachments or []:
+        if not isinstance(item, dict):
+            continue
+        node_id = item.get("workspaceNodeId") or item.get("nodeId") or item.get("id")
+        title = item.get("title") or item.get("name") or "附件"
+        if not node_id:
+            continue
+        node = db.execute(
+            select(V4WorkspaceNode).where(
+                V4WorkspaceNode.id == str(node_id),
+                V4WorkspaceNode.owner_user_id == current_user.user_id,
+                V4WorkspaceNode.is_deleted.is_(False),
+            )
+        ).scalar_one_or_none()
+        if node is None or not node.path:
+            continue
+        try:
+            parsed = parse_workspace_file(current_user.user_id, node.path)
+        except Exception:
+            continue
+        content_text = _trim_snippet(parsed.get("content_text") or "", 1200)
+        meta = parsed.get("meta") or {}
+        contexts.append(
+            {
+                "workspaceNodeId": node.id,
+                "title": title,
+                "path": node.path,
+                "fileType": (meta.get("path") or node.path or "").rsplit(".", 1)[-1].lower() if "." in (node.path or "") else "document",
+                "parser": meta.get("parser"),
+                "summary": _trim_snippet(node.summary or content_text, 180),
+                "excerpt": content_text,
+            }
+        )
+    return contexts
 
 
 def _trim_prompt_text(value: str, limit: int = 320) -> str:
@@ -177,19 +427,26 @@ def _assistant_prompt_preview(message: V4ConversationMessage) -> str:
     if content and content not in GENERIC_ASSISTANT_CONTENTS and content != "执行中":
         return _trim_prompt_text(content, 240)
 
-    meta = _loads(message.meta_json, {})
-    step_outcomes = meta.get("stepOutcomes") or []
-    fragments: list[str] = []
-    for step in step_outcomes[:2]:
-        title = (step.get("title") or step.get("summary") or "步骤").strip()
-        html_text = _strip_html(step.get("html") or "")
-        excerpt = _trim_prompt_text(html_text, 220) if html_text else ""
-        if excerpt:
-            fragments.append(f"{title}: {excerpt}")
-        elif title:
-            fragments.append(title)
-    if fragments:
-        return _trim_prompt_text(" | ".join(fragments), 320)
+    # 优先从 schema v2 的 content_blocks_json 里抽 text/artifact_ref 做摘要
+    blocks_raw = getattr(message, "content_blocks_json", None)
+    if blocks_raw:
+        blocks = _loads(blocks_raw, [])
+        if isinstance(blocks, list):
+            fragments: list[str] = []
+            for block in blocks:
+                if not isinstance(block, dict):
+                    continue
+                btype = block.get("type")
+                if btype == "text":
+                    text = str(block.get("text") or "").strip()
+                    if text:
+                        fragments.append(text)
+                elif btype == "artifact_ref":
+                    title = str(block.get("title") or "").strip()
+                    if title:
+                        fragments.append(f"交付物：{title}")
+            if fragments:
+                return _trim_prompt_text(" | ".join(fragments), 320)
 
     html_preview = _trim_prompt_text(_strip_html(message.content_html or ""), 260)
     if html_preview:
@@ -575,6 +832,54 @@ def _ensure_memory_docs(db: Session, current_user) -> V4UserProfile:
     return profile
 
 
+def _context_usage_payload(
+    *,
+    summary: str,
+    recent_messages: list[dict],
+    current_input: str = "",
+    conversation_id: str | None = None,
+) -> dict:
+    prompt_messages: list[dict[str, str]] = []
+    if (summary or "").strip():
+        prompt_messages.append({"role": "system", "content": summary.strip()})
+    for item in recent_messages:
+        prompt_messages.append(
+            {
+                "role": str(item.get("role") or "user"),
+                "content": str(item.get("content") or ""),
+            }
+        )
+    if (current_input or "").strip():
+        prompt_messages.append({"role": "user", "content": current_input.strip()})
+
+    estimated = estimate_tokens(prompt_messages) if prompt_messages else 0
+    used = estimated
+    source = "estimate"
+    api_payload: dict | None = None
+    api_usage = get_api_usage(conversation_id) if conversation_id else None
+    if api_usage and api_usage.prompt_tokens > 0:
+        # 以 API 最近一次 prompt_tokens 为基线；加上「估算中新增的那部分」避免只读历史不更新。
+        baseline = api_usage.prompt_tokens
+        used = max(baseline, estimated)
+        source = "api"
+        api_payload = api_usage.asdict()
+    window = max(1, settings.context_window_tokens)
+    ratio = used / window
+    will_compact_at = max(1, int(window * settings.context_compact_trigger_ratio))
+    payload = {
+        "used": used,
+        "window": window,
+        "ratio": round(ratio, 4),
+        "willCompactAt": will_compact_at,
+        "source": source,
+        "estimated": estimated,
+        "triggerRatio": settings.context_compact_trigger_ratio,
+    }
+    if api_payload is not None:
+        payload["apiUsage"] = api_payload
+    return payload
+
+
 def build_runtime_context(db: Session, conversation: V4Conversation) -> dict:
     messages = db.execute(
         select(V4ConversationMessage)
@@ -593,14 +898,26 @@ def build_runtime_context(db: Session, conversation: V4Conversation) -> dict:
     ]
     recent = simplified[-settings.compaction_preserve_recent_messages :]
     summary = conversation.running_context_summary or ""
+    context_usage = _context_usage_payload(
+        summary=summary,
+        recent_messages=recent,
+        conversation_id=conversation.id,
+    )
     return {
         "summary": summary,
         "recent_messages": recent,
         "message_count": len(simplified),
+        "contextUsage": context_usage,
     }
 
 
-def maybe_compact_conversation(db: Session, conversation: V4Conversation, current_user) -> None:
+def maybe_compact_conversation(
+    db: Session,
+    conversation: V4Conversation,
+    current_user,
+    *,
+    force: bool = False,
+) -> dict | None:
     messages = db.execute(
         select(V4ConversationMessage)
         .where(V4ConversationMessage.conversation_id == conversation.id)
@@ -628,23 +945,38 @@ def maybe_compact_conversation(db: Session, conversation: V4Conversation, curren
             max_chars=settings.debug_log_max_chars,
             max_string_chars=settings.debug_log_max_string_chars,
         )
-        return
+        return None
 
-    total_chars = sum(len(item["content"]) for item in simplified)
-    if total_chars < settings.compaction_max_chars:
+    prompt_recent = [
+        {
+            "id": item["id"],
+            "role": item["role"],
+            "content": _trim_prompt_text(item["content"], 240),
+            "skill_name": None,
+            "meta": item.get("meta") or {},
+        }
+        for item in simplified[-settings.compaction_preserve_recent_messages :]
+    ]
+    pre_usage = _context_usage_payload(
+        summary=conversation.running_context_summary or "",
+        recent_messages=prompt_recent,
+        conversation_id=conversation.id,
+    )
+    trigger_ratio = settings.context_compact_trigger_ratio
+    if not force and pre_usage["ratio"] < trigger_ratio:
         log_stage(
             "runtime.compaction.skip",
             {
                 "conversationId": conversation.id,
-                "reason": "total_chars_below_threshold",
-                "totalChars": total_chars,
-                "threshold": settings.compaction_max_chars,
+                "reason": "context_ratio_below_threshold",
+                "contextUsage": pre_usage,
+                "triggerRatio": trigger_ratio,
             },
             enabled=settings.debug_runtime_logs,
             max_chars=settings.debug_log_max_chars,
             max_string_chars=settings.debug_log_max_string_chars,
         )
-        return
+        return None
 
     older = simplified[: -settings.compaction_preserve_recent_messages]
     recent = simplified[-settings.compaction_preserve_recent_messages :]
@@ -673,11 +1005,14 @@ def maybe_compact_conversation(db: Session, conversation: V4Conversation, curren
         stats_json=_json(stats),
     )
     conversation.running_context_summary = compressed
+    post_usage = _context_usage_payload(summary=compressed, recent_messages=prompt_recent)
     conversation.running_context_json = _json(
         {
             "summary": compressed,
             "recentMessages": recent,
+            "messageCount": len(simplified),
             "stats": stats,
+            "contextUsage": post_usage,
         }
     )
     db.add(snapshot)
@@ -698,6 +1033,16 @@ def maybe_compact_conversation(db: Session, conversation: V4Conversation, curren
 
     profile = _ensure_memory_docs(db, current_user)
     _sync_session_summary_projection(db, current_user, profile)
+    return {
+        "snapshotId": snapshot.id,
+        "summary": compressed,
+        "stats": stats,
+        "messageCount": len(simplified),
+        "sourceMessageIds": [item["id"] for item in older],
+        "force": force,
+        "contextUsageBefore": pre_usage,
+        "contextUsageAfter": post_usage,
+    }
 
 
 def _create_artifact_and_workspace_entry(
@@ -709,15 +1054,27 @@ def _create_artifact_and_workspace_entry(
     artifact: dict,
     annotations: list[dict],
 ) -> V4ConversationArtifact:
+    artifact_contract = _normalize_artifact_contract(artifact)
+    desired_path = ensure_unique_workspace_path(
+        current_user.user_id,
+        resolve_writable_file_path(artifact_contract["title"]),
+        is_dir=False,
+    )
     node = V4WorkspaceNode(
         owner_user_id=current_user.user_id,
         owner_name=current_user.name,
         parent_id=None,
         node_type="document",
         source="conversation",
-        name=artifact["title"],
-        summary=artifact.get("summary"),
+        name=desired_path.rsplit("/", 1)[-1],
+        summary=artifact_contract.get("summary"),
+        path=desired_path,
+        relative_path=desired_path,
+        kind="document",
     )
+    content_text = html_to_plain_text(artifact_contract.get("contentHtml"), artifact_contract.get("summary"))
+    file_bytes = build_docx_bytes(artifact_contract["title"], artifact_contract.get("contentHtml"), content_text)
+    write_workspace_bytes(current_user.user_id, desired_path, file_bytes)
     db.add(node)
     db.flush()
 
@@ -725,22 +1082,13 @@ def _create_artifact_and_workspace_entry(
         current_user.user_id,
         node.id,
         1,
-        artifact["title"],
-        artifact.get("content_html"),
-        artifact.get("summary"),
+        node.name,
+        artifact_contract.get("contentHtml"),
+        content_text,
         annotations,
+        file_relative_path=desired_path,
+        extra_meta={"source": "conversation"},
     )
-    version = V4WorkspaceVersion(
-        node_id=node.id,
-        version_no=1,
-        title=artifact["title"],
-        content_text=artifact.get("summary"),
-        content_html=artifact.get("content_html"),
-        file_rel_path=version_path,
-        annotations_json=_json(annotations),
-    )
-    node.relative_path = version_path
-    db.add(version)
     db.add(
         V4WorkspaceAttachmentLink(
             conversation_id=conversation.id,
@@ -754,12 +1102,21 @@ def _create_artifact_and_workspace_entry(
         run_id=run.id,
         message_id=assistant_message.id,
         user_id=current_user.user_id,
-        artifact_type=artifact["artifact_type"],
-        title=artifact["title"],
-        summary=artifact.get("summary"),
-        content_html=artifact.get("content_html"),
+        artifact_type=artifact_contract["artifactType"],
+        title=artifact_contract["title"],
+        summary=artifact_contract.get("summary"),
+        content_html=artifact_contract.get("contentHtml"),
         workspace_node_id=node.id,
-        meta_json=_json({"relativePath": version_path}),
+        meta_json=_json(
+            {
+                "relativePath": desired_path,
+                "versionPath": version_path,
+                "sourceSkill": artifact_contract.get("sourceSkill"),
+                "sourceState": artifact_contract.get("sourceState"),
+                "status": "ready",
+                "errorDetail": None,
+            }
+        ),
     )
     db.add(saved)
     db.flush()
@@ -825,6 +1182,22 @@ def _save_new_events(
     return saved, len(runtime_events)
 
 
+def _planner_cli_events(planner_meta: dict[str, Any]) -> list[RuntimeTaskEvent]:
+    results: list[RuntimeTaskEvent] = []
+    for item in planner_meta.get("plannerCliEvents") or []:
+        results.append(
+            RuntimeTaskEvent(
+                item.get("event_type") or "cli_exec",
+                item.get("status") or "completed",
+                item.get("title") or "CLI 工具",
+                item.get("detail") or "",
+                item.get("detail_html") or "<pre></pre>",
+                item.get("payload") or {},
+            )
+        )
+    return results
+
+
 def _touch_profile_after_run(
     db: Session,
     current_user,
@@ -833,9 +1206,6 @@ def _touch_profile_after_run(
     requested_model: str | None,
 ) -> V4UserProfile:
     profile = _ensure_memory_docs(db, current_user)
-    preferred_skills = _loads(profile.preferred_skills_json, [])
-    if skill_name not in preferred_skills:
-        preferred_skills = [skill_name, *preferred_skills][:5]
     memory = _normalize_memory_state(_loads(profile.memory_json, {}))
     skill_usage = memory.setdefault("skillUsage", {})
     skill_usage[skill_name] = int(skill_usage.get(skill_name, 0)) + 1
@@ -855,12 +1225,7 @@ def _touch_profile_after_run(
         },
     )
     memory["recentFocus"] = recent_focus[:8]
-    profile.default_model = requested_model or profile.default_model or current_user.default_model
-    profile.preferred_skills_json = _json(preferred_skills)
     profile.memory_json = _json(memory)
-    profile.recommendation_summary = (
-        f"近期更常使用 {skill_name} 能力，建议继续围绕高频公文场景提供快捷入口。"
-    )
     profile.updated_at = datetime.utcnow()
     _sync_profile_memory_projection(db, current_user, profile, conversation=conversation)
     return profile
@@ -943,11 +1308,154 @@ def _merge_runtime_state(conversation: V4Conversation, runtime_context: dict, up
         "summary": runtime_context.get("summary") or current.get("summary") or "",
         "recentMessages": runtime_context.get("recent_messages") or current.get("recentMessages") or [],
         "messageCount": runtime_context.get("message_count") or current.get("messageCount") or 0,
+        "contextUsage": runtime_context.get("contextUsage") or current.get("contextUsage") or {},
     }
     merged.update({key: value for key, value in current.items() if key not in merged})
     merged.update(updates)
     conversation.running_context_json = _json(merged)
     return merged
+
+
+def _assistant_turn_count(db: Session, conversation_id: str) -> int:
+    messages = db.execute(
+        select(V4ConversationMessage)
+        .where(
+            V4ConversationMessage.conversation_id == conversation_id,
+            V4ConversationMessage.role == "assistant",
+        )
+        .order_by(V4ConversationMessage.created_at.asc())
+    ).scalars().all()
+    return len(messages)
+
+
+def _should_summarize_conversation_title(db: Session, conversation: V4Conversation) -> bool:
+    if conversation.title_locked:
+        return False
+    assistant_count = _assistant_turn_count(db, conversation.id)
+    if assistant_count <= 0:
+        return False
+    return assistant_count == 1 or assistant_count % TITLE_SUMMARY_INTERVAL == 0
+
+
+def _conversation_excerpt_for_title(messages: list[V4ConversationMessage]) -> str:
+    lines: list[str] = []
+    total_chars = 0
+    for message in messages[-TITLE_SUMMARY_MAX_MESSAGES:]:
+        role = "用户" if message.role == "user" else "助手"
+        content = _trim_prompt_text(_message_prompt_content(message), 240)
+        if not content:
+            continue
+        line = f"{role}: {content}"
+        if total_chars + len(line) > settings.compaction_summary_max_chars:
+            break
+        lines.append(line)
+        total_chars += len(line)
+    return "\n".join(lines)
+
+
+def _summarize_conversation_title(messages: list[V4ConversationMessage]) -> str:
+    excerpt = _conversation_excerpt_for_title(messages)
+    if not excerpt.strip():
+        return ""
+    prompt = (
+        "基于以下对话，生成一个 6-14 字中文标题。"
+        "要求：简洁、具体，不要标点，不要引号，不要输出解释，只输出标题本身。\n\n"
+        f"{excerpt}"
+    )
+    response = call_chat_model_with_messages(
+        [{"role": "user", "content": prompt}],
+        settings.planner_model or settings.llm_default_model,
+        purpose="conversation_title",
+        temperature=0.2,
+    )
+    return normalize_conversation_title(response.get("text") or "")
+
+
+def summarize_conversation_title_after_run(
+    conversation_id: str,
+    user_id: str,
+    run_id: str,
+) -> None:
+    db = SessionLocal()
+    try:
+        conversation = db.execute(
+            select(V4Conversation).where(
+                V4Conversation.id == conversation_id,
+                V4Conversation.user_id == user_id,
+                V4Conversation.is_deleted.is_(False),
+            )
+        ).scalar_one_or_none()
+        run = db.execute(
+            select(V4ConversationRun).where(
+                V4ConversationRun.id == run_id,
+                V4ConversationRun.conversation_id == conversation_id,
+                V4ConversationRun.user_id == user_id,
+            )
+        ).scalar_one_or_none()
+        if conversation is None or run is None:
+            return
+        if not _should_summarize_conversation_title(db, conversation):
+            return
+
+        messages = db.execute(
+            select(V4ConversationMessage)
+            .where(V4ConversationMessage.conversation_id == conversation.id)
+            .order_by(V4ConversationMessage.created_at.asc())
+        ).scalars().all()
+        if not messages:
+            return
+
+        try:
+            title = _summarize_conversation_title(messages)
+        except LLMCallError:
+            return
+        title = normalize_conversation_title(title)
+        if not title:
+            return
+
+        db.expire_all()
+        fresh_conversation = db.execute(
+            select(V4Conversation).where(
+                V4Conversation.id == conversation_id,
+                V4Conversation.user_id == user_id,
+                V4Conversation.is_deleted.is_(False),
+            )
+        ).scalar_one_or_none()
+        if fresh_conversation is None or fresh_conversation.title_locked:
+            return
+
+        fresh_conversation.title = title
+        fresh_conversation.title_version = int(fresh_conversation.title_version or 0) + 1
+        fresh_conversation.title_last_summarized_at = datetime.utcnow()
+        fresh_conversation.updated_at = datetime.utcnow()
+
+        event = V4TaskEvent(
+            run_id=run.id,
+            conversation_id=fresh_conversation.id,
+            user_id=user_id,
+            task_id=run.task_id,
+            parent_task_id=run.parent_task_id,
+            seq_no=_next_event_seq_no(db, run.id),
+            event_type="conversation_title_updated",
+            status="completed",
+            title="会话标题已更新",
+            detail=f"AI 已生成标题：{title}",
+            detail_html=f"<p>AI 已生成标题：{escape(title)}</p>",
+            payload_json=_json(
+                {
+                    "conversationId": fresh_conversation.id,
+                    "title": title,
+                    "titleVersion": fresh_conversation.title_version,
+                    "titleLocked": fresh_conversation.title_locked,
+                    "source": "ai_summary",
+                    "runId": run.id,
+                }
+            ),
+        )
+        db.add(event)
+        db.commit()
+    finally:
+        db.close()
 
 
 def _strip_html(value: str) -> str:
@@ -1164,10 +1672,12 @@ def _resolve_prompt_menu_choice(
                 ],
                 [
                     {
-                        "artifact_type": "document",
+                        "artifactType": "document",
                         "title": "审核联动核对稿.docx",
                         "summary": "已生成带审核标注的联动核对稿。",
-                        "content_html": "<p>已切换到人工核对模式，请在编辑器中处理审核问题。</p>",
+                        "contentHtml": "<p>已切换到人工核对模式，请在编辑器中处理审核问题。</p>",
+                        "sourceSkill": "review",
+                        "status": "ready",
                     }
                 ],
                 annotations,
@@ -1189,10 +1699,12 @@ def _resolve_prompt_menu_choice(
             ],
             [
                 {
-                    "artifact_type": "document",
+                    "artifactType": "document",
                     "title": "审核修订稿.docx",
                     "summary": "已根据审核意见生成修订稿。",
-                    "content_html": f"<p>{escape(revised_text)}</p>",
+                    "contentHtml": f"<p>{escape(revised_text)}</p>",
+                    "sourceSkill": "review",
+                    "status": "ready",
                 }
             ],
             [],
@@ -1222,10 +1734,12 @@ def _resolve_prompt_menu_choice(
             [{"type": "duplicate", "title": "查重报告", "html": f"<p>{escape(report_text)}</p>"}],
             [
                 {
-                    "artifact_type": "report",
+                    "artifactType": "report",
                     "title": "查重报告.docx",
                     "summary": "已生成正式查重报告。",
-                    "content_html": f"<p>{escape(report_text)}</p>",
+                    "contentHtml": f"<p>{escape(report_text)}</p>",
+                    "sourceSkill": "dedup",
+                    "status": "ready",
                 }
             ],
             annotations,
@@ -1272,10 +1786,12 @@ def _resolve_prompt_menu_choice(
             [{"type": "format", "title": "排版结果", "html": f"<p>已应用模板：{escape(template_name)}</p>"}],
             [
                 {
-                    "artifact_type": "document",
+                    "artifactType": "document",
                     "title": "排版完成稿.docx",
                     "summary": f"已应用模板：{template_name}",
-                    "content_html": f"<p>已应用模板：{escape(template_name)}</p>",
+                    "contentHtml": f"<p>已应用模板：{escape(template_name)}</p>",
+                    "sourceSkill": "layout",
+                    "status": "ready",
                 }
             ],
             [],
@@ -1458,12 +1974,14 @@ def prepare_run_conversation(
     requested_skill: str | None,
     requested_model: str | None,
     attachments: list[dict],
+    operation_context: dict | None,
     cookies: str | None,
     resume_from_waiting: bool = False,
     selected_option: str | None = None,
     prompt_menu_input: str | None = None,
 ) -> dict:
     requested_model = requested_model or current_user.default_model
+    operation_context = _normalize_operation_context(operation_context)
     runtime_state = _read_runtime_state(conversation)
     pending_prompt_menu = runtime_state.get("pendingPromptMenu")
     auto_resume_waiting = (
@@ -1499,6 +2017,7 @@ def prepare_run_conversation(
                 "requestedSkill": requested_skill,
                 "requestedModel": requested_model,
                 "attachments": attachments,
+                "operationContext": operation_context,
                 "resumeFromWaiting": resume_from_waiting,
                 "selectedOption": selected_option,
                 "promptMenuInput": prompt_menu_input,
@@ -1542,6 +2061,7 @@ def prepare_run_conversation(
             "requestedSkill": requested_skill,
             "requestedModel": requested_model,
             "attachments": attachments,
+            "operationContext": operation_context,
             "resumeFromWaiting": resume_from_waiting,
             "selectedOption": selected_option,
             "promptMenuInput": prompt_menu_input,
@@ -1557,6 +2077,7 @@ def run_conversation(
     requested_skill: str | None,
     requested_model: str | None,
     attachments: list[dict],
+    operation_context: dict | None,
     cookies: str | None,
     resume_from_waiting: bool = False,
     selected_option: str | None = None,
@@ -1565,6 +2086,8 @@ def run_conversation(
     prepared_task_id: str | None = None,
 ) -> dict:
     requested_model = requested_model or current_user.default_model
+    operation_context = _normalize_operation_context(operation_context)
+    effective_goal, rewrite_mode = _expand_effective_goal(content, operation_context)
     runtime_state = _read_runtime_state(conversation)
     pending_prompt_menu = runtime_state.get("pendingPromptMenu")
     auto_resume_waiting = (
@@ -1602,6 +2125,9 @@ def run_conversation(
                 "resolvedSkill": requested_skill or "pending_model_planner",
                 "requestedModel": requested_model,
                 "attachments": attachments,
+                "operationContext": operation_context,
+                "effectiveGoal": effective_goal,
+                "rewriteMode": rewrite_mode,
                 "cookiePreview": mask_cookie(cookies),
                 "resumeFromWaiting": resume_from_waiting,
                 "selectedOption": selected_option,
@@ -1617,6 +2143,15 @@ def run_conversation(
     memory_context = build_prompt_profile_docs(current_user, profile)
     runtime_context = build_runtime_context(db, conversation)
     runtime_context = _build_pending_context(runtime_context, runtime_state, content)
+    runtime_context["workspaceUserId"] = current_user.user_id
+    runtime_context["conversationId"] = conversation.id
+    runtime_context["contextUsage"] = _context_usage_payload(
+        summary=runtime_context.get("summary") or "",
+        recent_messages=runtime_context.get("recent_messages") or [],
+        current_input=effective_goal,
+        conversation_id=conversation.id,
+    )
+    attachment_context = _build_attachment_context(db, current_user, attachments)
 
     if resume_from_waiting:
         resume_mode = pending_prompt_menu.get("resumeMode") or "prompt_menu_choice"
@@ -1653,6 +2188,7 @@ def run_conversation(
             or "general"
         )
         content = (prompt_menu_input or selected_option or content or "").strip() or "继续执行"
+        effective_goal = pending_prompt_menu.get("resumeInput") or effective_goal or content
         planning_pre_events = None
         planning_saved_count = 0
         planning_run: V4ConversationRun | None = None
@@ -1678,7 +2214,7 @@ def run_conversation(
 
             on_planner = _make_planner_stream_batcher(push_planning_event)
             plan, planner_meta = build_model_execution_plan(
-                content,
+                effective_goal,
                 requested_skill,
                 attachments,
                 requested_model,
@@ -1691,7 +2227,7 @@ def run_conversation(
             planning_saved_count = saved_pre
         else:
             plan, planner_meta = build_model_execution_plan(
-                content,
+                effective_goal,
                 requested_skill,
                 attachments,
                 requested_model,
@@ -1741,13 +2277,20 @@ def run_conversation(
     packet = build_root_task_packet(
         task_id=task_id,
         conversation_id=conversation.id,
-        objective=content if not resume_from_waiting else f"恢复执行：{content}",
+        objective=effective_goal if not resume_from_waiting else f"恢复执行：{effective_goal}",
         requested_model=requested_model,
         plan=plan,
         attachments=attachments,
         runtime_context_summary=runtime_context["summary"],
         user_memory_refs=user_memory_refs,
     )
+    packet.input_payload["content"] = effective_goal
+    packet.input_payload["operationType"] = operation_context.get("intentType")
+    packet.input_payload["rewriteMode"] = rewrite_mode
+    packet.input_payload["baseUserGoal"] = operation_context.get("baseUserGoal") or effective_goal
+    packet.input_payload["latestAssistantSummary"] = operation_context.get("latestAssistantSummary")
+    packet.input_payload["latestArtifactRefs"] = operation_context.get("latestArtifactRefs") or []
+    packet.input_payload["attachmentContext"] = attachment_context
     if resume_from_waiting:
         packet.resume_token = pending_prompt_menu.get("resumeToken")
         packet.prompt_menu_contract = pending_prompt_menu.get("promptMenu") or {}
@@ -1757,7 +2300,7 @@ def run_conversation(
         "Leader Agent Root Task",
         team_id="leader-agent",
     )
-    a2a_task_registry.append_message(task_id, "user", content)
+    a2a_task_registry.append_message(task_id, "user", effective_goal)
     log_stage(
         "runtime.task_packet",
         {
@@ -1783,6 +2326,9 @@ def run_conversation(
         meta_json=_json(
             {
                 "attachments": attachments,
+                "effectiveGoal": effective_goal,
+                "operationType": operation_context.get("intentType"),
+                "regenerateContext": operation_context,
                 "tools": ["lead_agent"],
                 "leaderPlan": _plan_payload(plan),
                 "plannerMeta": planner_meta,
@@ -1797,7 +2343,7 @@ def run_conversation(
     if planning_run is not None:
         run = planning_run
         run.task_id = prepared_task_id or run.task_id or task_id
-        run.objective = content
+        run.objective = effective_goal
         run.requested_skill = primary_skill
         run.status = "running"
         run.model_name = requested_model
@@ -1806,6 +2352,7 @@ def run_conversation(
                 "taskPacket": packet.model_dump(),
                 "leaderPlan": _plan_payload(plan),
                 "plannerMeta": planner_meta,
+                "operationContext": operation_context,
                 "pendingPromptMenu": pending_prompt_menu if resume_from_waiting else None,
             }
         )
@@ -1820,7 +2367,7 @@ def run_conversation(
             )
         ).scalar_one()
         run.task_id = prepared_task_id or run.task_id or task_id
-        run.objective = content
+        run.objective = effective_goal
         run.requested_skill = primary_skill
         run.status = "running"
         run.model_name = requested_model
@@ -1829,6 +2376,7 @@ def run_conversation(
                 "taskPacket": packet.model_dump(),
                 "leaderPlan": _plan_payload(plan),
                 "plannerMeta": planner_meta,
+                "operationContext": operation_context,
                 "pendingPromptMenu": pending_prompt_menu if resume_from_waiting else None,
             }
         )
@@ -1839,7 +2387,7 @@ def run_conversation(
             conversation_id=conversation.id,
             user_id=current_user.user_id,
             task_id=task_id,
-            objective=content,
+            objective=effective_goal,
             requested_skill=primary_skill,
             status="running",
             model_name=requested_model,
@@ -1848,6 +2396,7 @@ def run_conversation(
                     "taskPacket": packet.model_dump(),
                     "leaderPlan": _plan_payload(plan),
                     "plannerMeta": planner_meta,
+                    "operationContext": operation_context,
                     "pendingPromptMenu": pending_prompt_menu if resume_from_waiting else None,
                 }
             ),
@@ -1861,6 +2410,26 @@ def run_conversation(
         saved_events_count = planning_saved_count
         runtime_events.extend(
             [
+                RuntimeTaskEvent(
+                    "context_usage",
+                    "info",
+                    "上下文使用情况",
+                    (
+                        f"{runtime_context['contextUsage']['used']} / "
+                        f"{runtime_context['contextUsage']['window']} tokens"
+                    ),
+                    (
+                        "<p>已完成本轮 prompt 上下文计量。</p>"
+                        f"<pre>used = {runtime_context['contextUsage']['used']}\n"
+                        f"window = {runtime_context['contextUsage']['window']}\n"
+                        f"ratio = {runtime_context['contextUsage']['ratio']}\n"
+                        f"willCompactAt = {runtime_context['contextUsage']['willCompactAt']}</pre>"
+                    ),
+                    runtime_context["contextUsage"],
+                ),
+            ]
+            + _planner_cli_events(planner_meta)
+            + [
                 RuntimeTaskEvent(
                     "running",
                     "running",
@@ -1904,6 +2473,24 @@ def run_conversation(
                 {"taskPacket": packet.model_dump(), "registry": root_task.snapshot()},
             ),
             RuntimeTaskEvent(
+                "context_usage",
+                "info",
+                "上下文使用情况",
+                (
+                    f"{runtime_context['contextUsage']['used']} / "
+                    f"{runtime_context['contextUsage']['window']} tokens"
+                ),
+                (
+                    "<p>已完成本轮 prompt 上下文计量。</p>"
+                    f"<pre>used = {runtime_context['contextUsage']['used']}\n"
+                    f"window = {runtime_context['contextUsage']['window']}\n"
+                    f"ratio = {runtime_context['contextUsage']['ratio']}\n"
+                    f"willCompactAt = {runtime_context['contextUsage']['willCompactAt']}</pre>"
+                ),
+                runtime_context["contextUsage"],
+            ),
+            *_planner_cli_events(planner_meta),
+            RuntimeTaskEvent(
                 "running",
                 "running",
                 "Lead Agent 生成执行计划",
@@ -1943,6 +2530,111 @@ def run_conversation(
         runtime_events.append(event)
         _, saved_events_count = _save_new_events(db, run, current_user, runtime_events, saved_events_count)
 
+    def persist_main_agent_waiting(prompt_menu: dict) -> dict:
+        pending_state = {
+            "resumeToken": f"{run.id}:{task_id}:preflight",
+            "taskId": task_id,
+            "parentTaskId": None,
+            "skillName": primary_skill,
+            "stepIndex": 0,
+            "title": "Main Agent 预补充",
+            "promptMenu": prompt_menu,
+            "resumeMode": prompt_menu.get("resumeMode") or "prompt_menu_choice",
+            "resumeCurrentStep": None,
+            "normalizedResult": {},
+            "annotations": [],
+            "remainingSteps": [_step_payload(item) for item in plan.steps],
+            "plan": _plan_payload(plan),
+            "resumeInput": effective_goal,
+            "sourceState": "main_agent_preflight",
+            "errorDetail": None,
+        }
+        preflight_text = (
+            prompt_menu.get("description") or prompt_menu.get("title") or "请先补充信息后继续。"
+        )
+        preflight_blocks = build_assistant_blocks(
+            plan=plan,
+            step_outcomes=[],
+            pending_artifacts=[],
+            pending_prompt_menu={"promptMenu": prompt_menu, "title": "Main Agent 预补充"},
+            planner_meta=planner_meta,
+            final_text=preflight_text,
+        )
+        assistant_message = V4ConversationMessage(
+            conversation_id=conversation.id,
+            run_id=run.id,
+            user_id=current_user.user_id,
+            role="assistant",
+            skill_name=primary_skill,
+            model_name=requested_model,
+            content=preflight_text,
+            content_html=blocks_to_snapshot_html(preflight_blocks),
+            annotations_json=_json([]),
+            content_blocks_json=_json(preflight_blocks),
+            schema_version=2,
+            meta_json=_json(
+                {
+                    "tools": ["lead_agent"],
+                    "effectiveGoal": effective_goal,
+                    "operationType": operation_context.get("intentType"),
+                    "regenerateContext": operation_context,
+                    "plannerMeta": planner_meta,
+                    "artifactRefs": [],
+                    "pendingPromptMenu": prompt_menu,
+                }
+            ),
+        )
+        db.add(assistant_message)
+        db.flush()
+        a2a_task_registry.set_output(task_id, prompt_menu.get("description") or "等待用户补充信息")
+        a2a_task_registry.set_status(task_id, TASK_STATUS_RUNNING)
+        run.status = "waiting_user"
+        run.assistant_message_id = assistant_message.id
+        run.result_summary = prompt_menu.get("description") or "等待用户补充信息"
+        run.updated_at = datetime.utcnow()
+        conversation.last_run_id = run.id
+        conversation.updated_at = datetime.utcnow()
+        conversation.last_message_at = conversation.updated_at
+        _merge_runtime_state(
+            conversation,
+            runtime_context,
+            {
+                "pendingPromptMenu": pending_state,
+                "taskTree": _collect_task_tree(task_ids),
+            },
+        )
+        db.commit()
+        push_event(
+            RuntimeTaskEvent(
+                "waiting_user",
+                "waiting_user",
+                "等待用户补充 · Main Agent",
+                prompt_menu.get("description") or prompt_menu.get("title") or "请补充信息后继续。",
+                f"<p>{escape(prompt_menu.get('description') or prompt_menu.get('title') or '请补充信息后继续。')}</p>",
+                {
+                    "taskId": task_id,
+                    "parentTaskId": None,
+                    "promptMenu": prompt_menu,
+                    "resumeToken": pending_state["resumeToken"],
+                    "sourceState": "main_agent_preflight",
+                    "assistantMessageId": assistant_message.id,
+                },
+            )
+        )
+        return {
+            "run": run,
+            "events": db.execute(
+                select(V4TaskEvent).where(V4TaskEvent.run_id == run.id).order_by(V4TaskEvent.seq_no.asc())
+            ).scalars().all(),
+            "assistant_message": assistant_message,
+            "artifacts": [],
+            "profile": profile,
+        }
+
+    preflight_prompt_menu = None if resume_from_waiting else _build_main_agent_prompt_menu(plan, effective_goal, attachments)
+    if preflight_prompt_menu:
+        return persist_main_agent_waiting(preflight_prompt_menu)
+
     def make_stream_delta_callback():
         last_flush_len = 0
         last_flush_t = time.monotonic()
@@ -1981,19 +2673,88 @@ def run_conversation(
     stream_delta_cb = make_stream_delta_callback()
 
     a2a_task_registry.set_status(task_id, TASK_STATUS_RUNNING)
-    current_input = pending_prompt_menu.get("resumeInput") if resume_from_waiting and pending_prompt_menu else content
+    current_input = pending_prompt_menu.get("resumeInput") if resume_from_waiting and pending_prompt_menu else effective_goal
     step_outcomes: list[dict] = []
     pending_artifacts: list[dict] = []
     task_ids = [task_id]
     agent_tool = AgentTool()
     pending_direct_answer = planner_meta.get("directAnswer") if not resume_from_waiting else None
 
+    inline_outcomes = planner_meta.get("inlineStepOutcomes") or []
+    inline_artifacts = planner_meta.get("inlineArtifacts") or []
+    if inline_outcomes and not resume_from_waiting:
+        step_outcomes.extend(inline_outcomes)
+        pending_artifacts.extend(inline_artifacts)
+        log_stage(
+            "runtime.flat_loop.seed",
+            {
+                "conversationId": conversation.id,
+                "inlineOutcomes": len(inline_outcomes),
+                "inlineArtifacts": len(inline_artifacts),
+            },
+            enabled=settings.debug_runtime_logs,
+            max_chars=settings.debug_log_max_chars,
+            max_string_chars=settings.debug_log_max_string_chars,
+        )
+        for outcome in inline_outcomes:
+            outcome_task_id = outcome.get("task_id") or f"inline_{outcome.get('index') or 0}"
+            skill_name = outcome.get("skill_name") or "general"
+            title = outcome.get("title") or title_for_skill(skill_name)
+            push_event(
+                RuntimeTaskEvent(
+                    "running",
+                    "running",
+                    f"Sub Agent · {title}",
+                    f"Lead Agent 已在 flat loop 内调度 sub-agent {skill_name}。",
+                    f"<p>Lead Agent 已在 flat loop 内调用 <strong>{escape(skill_name)}</strong>。</p>",
+                    {
+                        "taskId": outcome_task_id,
+                        "parentTaskId": task_id,
+                        "skillName": skill_name,
+                        "dispatchMode": "flat_tool_loop",
+                    },
+                )
+            )
+            push_event(
+                RuntimeTaskEvent(
+                    "tool_call",
+                    "completed" if outcome.get("source_state") != "model_error" else "failed",
+                    f"Skill Broker · {title}",
+                    outcome.get("summary") or "已返回 sub-agent 结果。",
+                    outcome.get("html") or "",
+                    {
+                        "taskId": outcome_task_id,
+                        "skillName": skill_name,
+                        "normalizedResult": outcome.get("normalized_result") or {},
+                        "retryable": outcome.get("retryable"),
+                        "sourceState": outcome.get("source_state"),
+                        "errorDetail": outcome.get("error_detail"),
+                        "annotations": outcome.get("annotations") or [],
+                        "dispatchMode": "flat_tool_loop",
+                    },
+                )
+            )
+
     def persist_run(status: str, pending_state: dict | None = None) -> dict:
-        assistant_summary, assistant_html = _build_final_assistant_output(
+        legacy_summary, _legacy_html = _build_final_assistant_output(
             requested_model,
             plan,
             step_outcomes,
         )
+        content_blocks = build_assistant_blocks(
+            plan=plan,
+            step_outcomes=step_outcomes,
+            pending_artifacts=pending_artifacts,
+            pending_prompt_menu=pending_state,
+            planner_meta=planner_meta,
+            final_text=legacy_summary if legacy_summary and legacy_summary != "任务未执行" else None,
+        )
+        assistant_summary = (
+            blocks_to_plain_text(content_blocks)
+            or legacy_summary
+            or ("等待你的下一步选择" if pending_state else "任务已完成")
+        )
+        assistant_html = blocks_to_snapshot_html(content_blocks)
         merged_annotations = _merge_annotations(step_outcomes)
         assistant_message = V4ConversationMessage(
             conversation_id=conversation.id,
@@ -2002,39 +2763,27 @@ def run_conversation(
             role="assistant",
             skill_name=primary_skill,
             model_name=requested_model,
-            content=assistant_summary or ("等待你的下一步选择" if pending_state else "任务已完成"),
+            content=assistant_summary,
             content_html=assistant_html,
             annotations_json=_json(merged_annotations),
+            content_blocks_json=_json(content_blocks),
+            schema_version=2,
             meta_json=_json(
                 {
                     "tools": ["lead_agent", *[item["skill_name"] for item in step_outcomes]],
                     "keyFiles": [],
-                    "leaderPlan": _plan_payload(plan),
+                    "effectiveGoal": effective_goal,
+                    "operationType": operation_context.get("intentType"),
+                    "regenerateContext": operation_context,
                     "plannerMeta": planner_meta,
-                    "plannerReasoning": planner_meta.get("reasoningContent"),
-                    "normalizedResult": [item["normalized_result"] for item in step_outcomes],
-                    "handoffTrace": _subtask_trace(step_outcomes),
-                    "stepOutcomes": step_outcomes,
+                    "artifactRefs": [],
                     "pendingPromptMenu": pending_state["promptMenu"] if pending_state else None,
-                    "messageActions": _message_actions(),
                 }
             ),
         )
         db.add(assistant_message)
         db.flush()
-
-        artifacts = [
-            _create_artifact_and_workspace_entry(
-                db,
-                current_user,
-                conversation,
-                run,
-                assistant_message,
-                artifact,
-                merged_annotations,
-            )
-            for artifact in pending_artifacts
-        ]
+        artifacts: list[V4ConversationArtifact] = []
 
         a2a_task_registry.set_output(task_id, assistant_summary or "任务已完成")
         a2a_task_registry.set_status(
@@ -2046,9 +2795,6 @@ def run_conversation(
         run.assistant_message_id = assistant_message.id
         run.result_summary = assistant_summary or ("等待用户继续选择" if pending_state else "任务已完成")
         run.updated_at = datetime.utcnow()
-        conversation.title = clip_title(
-            conversation.title if conversation.title != "新对话" else content
-        )
         conversation.last_run_id = run.id
         conversation.updated_at = datetime.utcnow()
         conversation.last_message_at = conversation.updated_at
@@ -2060,7 +2806,7 @@ def run_conversation(
                 "taskTree": _collect_task_tree(task_ids),
             },
         )
-        maybe_compact_conversation(db, conversation, current_user)
+        compaction_result = maybe_compact_conversation(db, conversation, current_user)
         current_profile = _touch_profile_after_run(
             db,
             current_user,
@@ -2069,6 +2815,99 @@ def run_conversation(
             requested_model,
         )
         db.commit()
+        push_event(
+            RuntimeTaskEvent(
+                "message_final",
+                "completed",
+                "助手消息已生成",
+                "最终回答已写入当前会话。",
+                "<p>最终回答已写入当前会话。</p>",
+                {
+                    "assistantMessageId": assistant_message.id,
+                    "artifactIds": [],
+                },
+            )
+        )
+        artifact_error_payload = None
+        artifact_draft = _normalize_artifact_contract(
+            pending_artifacts[0] if pending_artifacts else None,
+            default_source_skill=primary_skill,
+            default_status="artifact_error",
+        )
+        if pending_artifacts:
+            try:
+                for artifact in pending_artifacts:
+                    artifacts.append(
+                        _create_artifact_and_workspace_entry(
+                            db,
+                            current_user,
+                            conversation,
+                            run,
+                            assistant_message,
+                            artifact,
+                            merged_annotations,
+                        )
+                    )
+                assistant_meta = _loads(assistant_message.meta_json, {})
+                assistant_meta["artifactRefs"] = _artifact_ref_payloads(artifacts)
+                assistant_message.meta_json = _json(assistant_meta)
+                db.commit()
+            except Exception as artifact_exc:
+                db.rollback()
+                artifact_error_payload = {
+                    "assistantMessageId": assistant_message.id,
+                    "errorScope": "artifact",
+                    "errorDetail": str(artifact_exc),
+                    "artifactDraft": _normalize_artifact_contract(
+                        artifact_draft,
+                        default_source_skill=primary_skill,
+                        default_status="artifact_error",
+                        error_detail=str(artifact_exc),
+                    ),
+                }
+                db.refresh(run)
+                db.refresh(conversation)
+                db.refresh(assistant_message)
+        if artifacts:
+            for artifact in artifacts:
+                artifact_payload = _artifact_contract_from_record(artifact)
+                push_event(
+                    RuntimeTaskEvent(
+                        "artifact_created",
+                        "completed",
+                        f"产物已生成 · {artifact.title}",
+                        artifact.summary or "已生成新的工作区产物。",
+                        f"<p>已生成产物 <strong>{escape(artifact.title)}</strong>。</p>",
+                        artifact_payload,
+                    )
+                )
+        if artifact_error_payload:
+            push_event(
+                RuntimeTaskEvent(
+                    "failed",
+                    "failed",
+                    "交付物生成失败",
+                    artifact_error_payload["errorDetail"],
+                    f"<p>{escape(artifact_error_payload['errorDetail'])}</p>",
+                    artifact_error_payload,
+                )
+            )
+        if compaction_result:
+            push_event(
+                RuntimeTaskEvent(
+                    "context_compacted",
+                    "completed",
+                    "上下文压缩",
+                    "已自动压缩较早消息，保留近期上下文。",
+                    (
+                        "<p>已自动压缩较早消息，保留近期上下文。</p>"
+                        f"<pre>before = {compaction_result['contextUsageBefore']['used']} / {compaction_result['contextUsageBefore']['window']}\n"
+                        f"after = {compaction_result['contextUsageAfter']['used']} / {compaction_result['contextUsageAfter']['window']}\n"
+                        f"summarySnapshot = {escape(compaction_result['summary'][:1200])}</pre>"
+                    ),
+                    compaction_result,
+                )
+            )
         if pending_state:
             push_event(
                 RuntimeTaskEvent(
@@ -2115,6 +2954,15 @@ def run_conversation(
 
     def persist_failure(exc: Exception) -> dict:
         failure_text = str(exc) or "执行失败"
+        content_blocks = build_assistant_blocks(
+            plan=plan,
+            step_outcomes=step_outcomes,
+            pending_artifacts=pending_artifacts,
+            pending_prompt_menu=None,
+            planner_meta=planner_meta,
+            final_text=failure_text,
+        )
+        assistant_html = blocks_to_snapshot_html(content_blocks)
         assistant_message = V4ConversationMessage(
             conversation_id=conversation.id,
             run_id=run.id,
@@ -2123,20 +2971,16 @@ def run_conversation(
             skill_name=primary_skill,
             model_name=requested_model,
             content="执行失败",
-            content_html=f"<section class='assistant-block'><h4>执行失败</h4><p>{escape(failure_text)}</p></section>",
+            content_html=assistant_html,
             annotations_json=_json([]),
+            content_blocks_json=_json(content_blocks),
+            schema_version=2,
             meta_json=_json(
                 {
                     "tools": ["lead_agent", *[item["skill_name"] for item in step_outcomes]],
                     "keyFiles": [],
-                    "leaderPlan": _plan_payload(plan),
                     "plannerMeta": planner_meta,
-                    "plannerReasoning": planner_meta.get("reasoningContent"),
-                    "normalizedResult": [],
-                    "handoffTrace": _subtask_trace(step_outcomes),
-                    "stepOutcomes": step_outcomes,
                     "pendingPromptMenu": None,
-                    "messageActions": _message_actions(),
                 }
             ),
         )
@@ -2210,6 +3054,12 @@ def run_conversation(
                 runtime_context_summary=runtime_context["summary"],
                 user_memory_refs=user_memory_refs,
                 handoff_trace=[],
+                operation_type=operation_context.get("intentType"),
+                rewrite_mode=rewrite_mode,
+                base_user_goal=operation_context.get("baseUserGoal") or effective_goal,
+                latest_assistant_summary=operation_context.get("latestAssistantSummary"),
+                latest_artifact_refs=operation_context.get("latestArtifactRefs") or [],
+                attachment_context=attachment_context,
             )
             a2a_task_registry.register(
                 choice_packet,
@@ -2290,7 +3140,7 @@ def run_conversation(
         leader_messages: list[dict] | None = None
         if plan.steps:
             leader_messages = main_agent_inst._build_messages(
-                content, attachments, runtime_context, memory_context
+                effective_goal, attachments, runtime_context, memory_context
             )
             last_user = leader_messages[-1]
             u = last_user.get("content", "")
@@ -2323,6 +3173,12 @@ def run_conversation(
                 runtime_context_summary=runtime_context["summary"],
                 user_memory_refs=user_memory_refs,
                 handoff_trace=handoff_trace,
+                operation_type=operation_context.get("intentType"),
+                rewrite_mode=rewrite_mode,
+                base_user_goal=operation_context.get("baseUserGoal") or effective_goal,
+                latest_assistant_summary=operation_context.get("latestAssistantSummary"),
+                latest_artifact_refs=operation_context.get("latestArtifactRefs") or [],
+                attachment_context=attachment_context,
             )
             subtask_record = a2a_task_registry.register(
                 subtask_packet,
@@ -2439,6 +3295,9 @@ def run_conversation(
                         "retryable": skill_result.retryable,
                         "sourceState": skill_result.source_state,
                         "errorDetail": skill_result.error_detail,
+                        "attachmentCount": len(attachment_context),
+                        "operationType": operation_context.get("intentType"),
+                        "rewriteMode": rewrite_mode,
                         "registry": a2a_task_registry.get_snapshot(subtask_id),
                     },
                 )
@@ -2501,11 +3360,19 @@ def run_conversation(
                     next_cin,
                 )
             if step.skill_name in INTERACTIVE_SKILLS:
-                prompt_menu = _build_prompt_menu(
-                    step,
-                    skill_result.normalized_result,
-                    skill_result.editor_annotations,
-                    skill_result,
+                prompt_menu = (
+                    {}
+                    if (
+                        step.skill_name == "writing"
+                        and _looks_like_document_request(cin)
+                        and skill_result.source_state != "model_error"
+                    )
+                    else _build_prompt_menu(
+                        step,
+                        skill_result.normalized_result,
+                        skill_result.editor_annotations,
+                        skill_result,
+                    )
                 )
                 if prompt_menu:
                     return (
@@ -2550,7 +3417,7 @@ def run_conversation(
                 try:
                     guarded = apply_leader_context_guard(
                         leader_messages,
-                        max_context_tokens=settings.compaction_max_chars // 4,
+                        max_context_tokens=settings.context_window_tokens,
                     )
                     reflect = main_agent_inst.leader_step(guarded, requested_model)
                     log_stage(
@@ -2658,6 +3525,7 @@ def execute_prepared_run(
     requested_skill: str | None,
     requested_model: str | None,
     attachments: list[dict],
+    operation_context: dict | None,
     cookies: str | None,
     resume_from_waiting: bool = False,
     selected_option: str | None = None,
@@ -2680,6 +3548,7 @@ def execute_prepared_run(
             requested_skill,
             requested_model,
             attachments,
+            operation_context,
             cookies,
             resume_from_waiting,
             selected_option,
@@ -2720,8 +3589,8 @@ def build_prompt_profile_docs(current_user, profile: V4UserProfile) -> dict:
         current_user.user_id,
         raw_docs["memory_markdown"],
         prefix="topics/",
-        max_files=3,
-        max_chars_per_file=900,
+        max_files=8,
+        max_chars_per_file=1200,
         section_title="已展开的关键主题内容",
     )
     sess_expanded = _expand_memory_index_markdown(
@@ -2734,6 +3603,6 @@ def build_prompt_profile_docs(current_user, profile: V4UserProfile) -> dict:
     )
     return {
         "identify_markdown": summarize_memory_for_context(raw_docs["identify_markdown"] or "", max_chars=1200),
-        "memory_markdown": summarize_memory_for_context(mem_expanded, max_chars=2000),
+        "memory_markdown": summarize_memory_for_context(mem_expanded, max_chars=3600),
         "session_summary_markdown": summarize_memory_for_context(sess_expanded, max_chars=1600),
     }

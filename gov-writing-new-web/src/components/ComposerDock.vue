@@ -1,5 +1,7 @@
 <script setup>
 import { computed, ref } from "vue";
+import AttachmentChip from "@/components/AttachmentChip.vue";
+import ContextMeter from "@/components/ContextMeter.vue";
 import PromptMenu from "@/components/PromptMenu.vue";
 
 const props = defineProps({
@@ -14,6 +16,10 @@ const props = defineProps({
   loading: {
     type: Boolean,
     default: false,
+  },
+  contextUsage: {
+    type: Object,
+    default: null,
   },
   modelOptions: {
     type: Array,
@@ -35,6 +41,10 @@ const props = defineProps({
     type: Array,
     default: () => [],
   },
+  compactionHistory: {
+    type: Array,
+    default: () => [],
+  },
 });
 
 const emit = defineEmits([
@@ -48,6 +58,8 @@ const emit = defineEmits([
   "select-model",
   "prompt-submit",
   "remove-attachment",
+  "open-attachment",
+  "compact-context",
 ]);
 
 const attachmentMenuOpen = ref(false);
@@ -129,6 +141,17 @@ function onKeydown(event) {
       />
 
       <div class="composer-actions">
+        <ContextMeter
+          v-if="contextUsage"
+          class="composer-context-meter"
+          :usage="contextUsage"
+          :loading="loading"
+          :history="compactionHistory"
+          @compact="emit('compact-context')"
+        />
+
+        <div class="composer-actions-spacer" />
+
         <div class="dropdown-anchor">
           <button class="ghost-pill selected" type="button" aria-label="模型选择" @click="modelMenuOpen = !modelMenuOpen">
             <span class="material-symbols-rounded" style="font-size: 18px">neurology</span>
@@ -186,63 +209,35 @@ function onKeydown(event) {
     </div>
 
     <div class="chip-row attachment-chips" v-if="uploadedAttachments.length">
-      <span v-for="item in uploadedAttachments" :key="item.nodeId" class="attachment-chip">
-        <span class="material-symbols-rounded chip-file-icon">description</span>
-        <span class="chip-name">{{ item.name }}</span>
-        <button
-          type="button"
-          class="chip-remove"
-          aria-label="移除附件"
-          @click.stop="emit('remove-attachment', item)"
-        >
-          <span class="material-symbols-rounded">close</span>
-        </button>
-      </span>
+      <AttachmentChip
+        v-for="item in uploadedAttachments"
+        :key="item.nodeId"
+        :item="item"
+        :removable="true"
+        @open="emit('open-attachment', $event)"
+        @remove="emit('remove-attachment', $event)"
+      />
     </div>
   </div>
 </template>
 
 <style scoped>
 .attachment-chips {
-  flex-wrap: wrap;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.composer-actions {
+  display: flex;
+  align-items: center;
   gap: 8px;
 }
 
-.attachment-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 8px 6px 10px;
-  border-radius: 10px;
-  background: var(--primary-50, #e8f0fe);
-  border: 1px solid var(--outline, #e4e4e2);
-  font-size: 13px;
-  color: var(--grey-900, #1f1f1f);
-  max-width: 100%;
+.composer-context-meter {
+  margin-right: 4px;
 }
 
-.chip-file-icon {
-  font-size: 18px;
-  color: var(--primary-600, #0b57d0);
-}
-
-.chip-name {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  max-width: 220px;
-}
-
-.chip-remove {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 2px;
-  border-radius: 6px;
-  color: var(--grey-600, #5e5e5e);
-}
-
-.chip-remove:hover {
-  background: rgba(0, 0, 0, 0.06);
+.composer-actions-spacer {
+  flex: 1;
 }
 </style>

@@ -136,25 +136,72 @@ CHARS_PER_TOKEN_EST = 4
 DEFAULT_MAX_CONTEXT_TOKENS = 32000
 DEFAULT_TOOL_RESULT_MAX_CHARS = 4000
 
+_TIKTOKEN_ENC = None
+_TIKTOKEN_TRIED = False
 
-def estimate_tokens(messages: list[dict]) -> int:
-    """粗略估计 messages 的 token 数（用于预检与裁剪触发）。"""
-    total_chars = 0
+
+def _get_tiktoken_encoding():
+    """首次加载 tiktoken cl100k_base；失败一次后不再重试以避免噪声。"""
+    global _TIKTOKEN_ENC, _TIKTOKEN_TRIED
+    if _TIKTOKEN_TRIED:
+        return _TIKTOKEN_ENC
+    _TIKTOKEN_TRIED = True
+    try:
+        import tiktoken
+
+        _TIKTOKEN_ENC = tiktoken.get_encoding("cl100k_base")
+    except Exception:  # noqa: BLE001
+        _TIKTOKEN_ENC = None
+    return _TIKTOKEN_ENC
+
+
+def _message_plain_text(messages: list[dict]) -> str:
+    parts: list[str] = []
     for msg in messages:
-        role = msg.get("role") or ""
         content = msg.get("content")
         if isinstance(content, str):
-            total_chars += len(content)
+            parts.append(content)
         elif isinstance(content, list):
             for part in content:
                 if isinstance(part, dict):
-                    total_chars += len(str(part.get("text") or part.get("output_text") or ""))
-        tool_calls = msg.get("tool_calls") or []
-        for tc in tool_calls:
+                    parts.append(str(part.get("text") or part.get("output_text") or ""))
+        for tc in msg.get("tool_calls") or []:
             fn = (tc or {}).get("function") or {}
-            total_chars += len(str(fn.get("arguments") or "")) + len(str(fn.get("name") or ""))
-        if role == "tool":
-            total_chars += len(str(msg.get("tool_call_id") or ""))
+            parts.append(str(fn.get("arguments") or ""))
+            parts.append(str(fn.get("name") or ""))
+        if msg.get("role") == "tool":
+            parts.append(str(msg.get("tool_call_id") or ""))
+    return "\n".join(parts)
+
+
+def estimate_tokens(messages: list[dict]) -> int:
+    """估计 messages 的 token 数：优先 tiktoken cl100k_base，失败时回退到字符/4 的粗估。"""
+    encoding = _get_tiktoken_encoding()
+    if encoding is not None:
+        try:
+            total = 0
+            for msg in messages:
+                content = msg.get("content")
+                if isinstance(content, str):
+                    total += len(encoding.encode(content))
+                elif isinstance(content, list):
+                    for part in content:
+                        if isinstance(part, dict):
+                            total += len(
+                                encoding.encode(
+                                    str(part.get("text") or part.get("output_text") or "")
+                                )
+                            )
+                for tc in msg.get("tool_calls") or []:
+                    fn = (tc or {}).get("function") or {}
+                    total += len(encoding.encode(str(fn.get("arguments") or "")))
+                    total += len(encoding.encode(str(fn.get("name") or "")))
+                # 每条消息在 OpenAI 格式里会带一些角色/分隔 token，加 4 作为经验校正。
+                total += 4
+            return max(1, total)
+        except Exception:  # noqa: BLE001
+            pass
+    total_chars = len(_message_plain_text(messages))
     return max(1, total_chars // CHARS_PER_TOKEN_EST)
 
 

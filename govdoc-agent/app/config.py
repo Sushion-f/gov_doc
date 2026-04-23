@@ -18,20 +18,23 @@ def _load_dotenv() -> None:
 
 
 def _load_model_json() -> dict:
-    """读取 config/model.json 中的 llm 段；文件缺失或解析失败时返回空 dict。"""
+    """读取 config/model.json；文件缺失或解析失败时返回空 dict。"""
     if not _MODEL_JSON_PATH.is_file():
         return {}
     try:
         with open(_MODEL_JSON_PATH, encoding="utf-8") as f:
             data = json.load(f)
-        llm = data.get("llm")
-        return llm if isinstance(llm, dict) else {}
+        return data if isinstance(data, dict) else {}
     except (OSError, json.JSONDecodeError, TypeError):
         return {}
 
 
 _load_dotenv()
-_MODEL_LLM = _load_model_json()
+_MODEL_CONFIG = _load_model_json()
+_MODEL_LLM = _MODEL_CONFIG.get("llm") if isinstance(_MODEL_CONFIG.get("llm"), dict) else {}
+_MODEL_CONTEXT = (
+    _MODEL_CONFIG.get("context") if isinstance(_MODEL_CONFIG.get("context"), dict) else {}
+)
 
 
 def _llm_str(key: str) -> str:
@@ -70,6 +73,24 @@ def _llm_bool(key: str, if_missing: bool) -> bool:
     if isinstance(raw, str) and raw.strip() == "":
         return if_missing
     return str(raw).lower() == "true"
+
+
+def _context_float(key: str, if_missing: float) -> float:
+    raw = _MODEL_CONTEXT.get(key)
+    if raw is None:
+        return if_missing
+    if isinstance(raw, str) and raw.strip() == "":
+        return if_missing
+    return float(raw)
+
+
+def _context_int(key: str, if_missing: int) -> int:
+    raw = _MODEL_CONTEXT.get(key)
+    if raw is None:
+        return if_missing
+    if isinstance(raw, str) and raw.strip() == "":
+        return if_missing
+    return int(raw)
 
 
 def _parse_available_models() -> list[dict[str, str]]:
@@ -115,19 +136,74 @@ class Settings:
     debug_log_max_string_chars = int(
         os.getenv("NEW_APP_DEBUG_LOG_MAX_STRING_CHARS", "12000")
     )
-    workspace_root = os.getenv("NEW_APP_WORKSPACE_ROOT", "/data/new-app/users")
-    compaction_preserve_recent_messages = int(
-        os.getenv("NEW_APP_COMPACTION_PRESERVE_RECENT_MESSAGES", "4")
+    # 分路日志：后端调用、模型调用各写独立文件；空字符串表示落在默认 runtime_logs/ 下。
+    backend_log_path = os.getenv(
+        "NEW_APP_BACKEND_LOG_PATH",
+        str(_ROOT / "runtime_logs" / "backend.log"),
     )
-    compaction_max_chars = int(os.getenv("NEW_APP_COMPACTION_MAX_CHARS", "8000"))
+    model_log_path = os.getenv(
+        "NEW_APP_MODEL_LOG_PATH",
+        str(_ROOT / "runtime_logs" / "model.log"),
+    )
+    # 单个日志文件上限（字节），超过后滚动到 .1/.2/... 保留历史。
+    log_file_max_bytes = int(os.getenv("NEW_APP_LOG_FILE_MAX_BYTES", str(20 * 1024 * 1024)))
+    log_file_backup_count = int(os.getenv("NEW_APP_LOG_FILE_BACKUP_COUNT", "5"))
+    # 是否同时把 log_stage 的内容回显到 stdout（便于 uvicorn 聚合日志查看）；默认关闭以免和文件重复。
+    log_stage_echo_stdout = os.getenv("NEW_APP_LOG_STAGE_ECHO_STDOUT", "false").lower() == "true"
+    # debug 日志样式：summary=汇总输入/汇总输出的人类可读块（默认）；json=整条缩进 JSON（旧版，便于深度排错）
+    _debug_log_style = os.getenv("NEW_APP_DEBUG_LOG_STYLE", "summary").strip().lower()
+    debug_log_style = _debug_log_style if _debug_log_style in ("summary", "json") else "summary"
+    workspace_root = os.getenv("NEW_APP_WORKSPACE_ROOT", "/data/new-app/users")
+    context_window_tokens = int(
+        os.getenv(
+            "NEW_APP_CONTEXT_WINDOW_TOKENS",
+            str(_context_int("window_tokens", 128000)),
+        )
+    )
+    context_compact_trigger_ratio = float(
+        os.getenv(
+            "NEW_APP_CONTEXT_COMPACT_TRIGGER_RATIO",
+            str(_context_float("compact_trigger_ratio", 0.75)),
+        )
+    )
+    context_compact_target_ratio = float(
+        os.getenv(
+            "NEW_APP_CONTEXT_COMPACT_TARGET_RATIO",
+            str(_context_float("compact_target_ratio", 0.40)),
+        )
+    )
+    compaction_preserve_recent_messages = int(
+        os.getenv(
+            "NEW_APP_COMPACTION_PRESERVE_RECENT_MESSAGES",
+            str(_context_int("keep_recent_messages", 6)),
+        )
+    )
+    compaction_max_chars = int(
+        os.getenv(
+            "NEW_APP_COMPACTION_MAX_CHARS",
+            str(int(context_window_tokens * context_compact_trigger_ratio * 4)),
+        )
+    )
     compaction_summary_max_chars = int(
-        os.getenv("NEW_APP_COMPACTION_SUMMARY_MAX_CHARS", "1200")
+        os.getenv(
+            "NEW_APP_COMPACTION_SUMMARY_MAX_CHARS",
+            str(_context_int("summary_max_chars", 4000)),
+        )
     )
     compaction_summary_max_lines = int(
         os.getenv("NEW_APP_COMPACTION_SUMMARY_MAX_LINES", "24")
     )
     compaction_summary_max_line_chars = int(
         os.getenv("NEW_APP_COMPACTION_SUMMARY_MAX_LINE_CHARS", "160")
+    )
+    planner_max_tool_rounds = int(
+        os.getenv("NEW_APP_PLANNER_MAX_TOOL_ROUNDS", "6")
+    )
+    subagent_max_depth = int(
+        os.getenv("NEW_APP_SUBAGENT_MAX_DEPTH", "3")
+    )
+    subagent_max_output_retries = int(
+        os.getenv("NEW_APP_SUBAGENT_MAX_OUTPUT_RETRIES", "1")
     )
     cors_origins = [
         item.strip()

@@ -7,6 +7,7 @@ import requests
 from agents import canonical_agent_name, system_prompt_for_agent
 from .config import settings
 from .debug_log import log_stage
+from .skills_registry import get_skill_overlay
 
 
 # 仅保留「短别名 → 当前默认接入点」；真实 model id 不在此表则原样传给网关。
@@ -47,11 +48,17 @@ def build_messages(
     memory_context: dict | None = None,
     task_packet: dict | None = None,
 ):
-    system_prompt = system_prompt_for_agent(canonical_agent_name(skill) or "general")
+    canonical_name = canonical_agent_name(skill) or "general"
+    overlay = get_skill_overlay(canonical_name)
+    if overlay and overlay.system_prompt:
+        system_prompt = overlay.system_prompt
+    else:
+        system_prompt = system_prompt_for_agent(canonical_name)
     messages = [{"role": "system", "content": system_prompt}]
 
     context_lines: list[str] = []
     if task_packet:
+        input_payload = task_packet.get("input_payload") or {}
         context_lines.extend(
             [
                 "当前由 leader agent 下发结构化任务，请遵守执行契约。",
@@ -61,6 +68,45 @@ def build_messages(
                 f"- escalation_policy: {task_packet.get('escalation_policy') or ''}",
             ]
         )
+        if input_payload.get("baseUserGoal"):
+            context_lines.append(f"- 原始用户目标: {input_payload.get('baseUserGoal')}")
+        if input_payload.get("operationType") or input_payload.get("rewriteMode"):
+            context_lines.append(
+                "- 本次动作类型: "
+                f"{input_payload.get('operationType') or 'generate'}"
+                f" / {input_payload.get('rewriteMode') or 'default'}"
+            )
+        if input_payload.get("latestAssistantSummary"):
+            context_lines.append("最近一次结果摘要：")
+            context_lines.append(str(input_payload.get("latestAssistantSummary")))
+        latest_artifact_refs = input_payload.get("latestArtifactRefs") or []
+        if latest_artifact_refs:
+            context_lines.append("最近一次交付物引用：")
+            for item in latest_artifact_refs[:3]:
+                if not isinstance(item, dict):
+                    continue
+                title = item.get("title") or "未命名交付物"
+                summary = item.get("summary") or ""
+                node_id = item.get("workspaceNodeId") or ""
+                context_lines.append(
+                    f"- {title}"
+                    + (f" | {summary}" if summary else "")
+                    + (f" | node={node_id}" if node_id else "")
+                )
+        attachment_context = input_payload.get("attachmentContext") or []
+        if attachment_context:
+            context_lines.append(f"附件背景素材（共 {len(attachment_context)} 个）：")
+            for item in attachment_context[:4]:
+                if not isinstance(item, dict):
+                    continue
+                title = item.get("title") or "附件"
+                summary = item.get("summary") or ""
+                excerpt = item.get("excerpt") or ""
+                context_lines.append(
+                    f"- {title}"
+                    + (f" | 摘要：{summary}" if summary else "")
+                    + (f"\n  节选：{excerpt}" if excerpt else "")
+                )
     if runtime_context:
         summary = runtime_context.get("summary") or ""
         recent_messages = runtime_context.get("recent_messages") or []
@@ -253,7 +299,7 @@ def call_chat_model_with_messages_raw(
                             "error": str(exc),
                             "preview": (chunk_text[:240] + "…") if len(chunk_text) > 240 else chunk_text,
                         },
-                        enabled=True,
+                        enabled=settings.debug_runtime_logs,
                         max_chars=settings.debug_log_max_chars,
                         max_string_chars=settings.debug_log_max_string_chars,
                     )
@@ -292,7 +338,19 @@ def call_chat_model_with_messages_raw(
             }
             if tool_calls:
                 message["tool_calls"] = tool_calls
-            data = {"object": "chat.completion.chunk.stream", "chunks": chunks, "message": message}
+            # 很多 OpenAI 兼容网关会在最后一个 chunk 里带上 usage；优先取最后看到的非空 usage。
+            stream_usage: dict | None = None
+            for chunk in reversed(chunks):
+                candidate = chunk.get("usage") if isinstance(chunk, dict) else None
+                if isinstance(candidate, dict) and candidate:
+                    stream_usage = candidate
+                    break
+            data = {
+                "object": "chat.completion.chunk.stream",
+                "chunks": chunks,
+                "message": message,
+                "usage": stream_usage or {},
+            }
         else:
             data = response.json()
             choices = data.get("choices") or []
@@ -303,25 +361,37 @@ def call_chat_model_with_messages_raw(
         tool_calls = message.get("tool_calls") or []
         if not text and not tool_calls:
             raise LLMCallError("模型返回内容为空")
+        # 约定：流式调用也只在流全部结束后以单条聚合日志写入 model.log，避免 per-chunk 刷屏。
+        # 因此流式模式下**绝不**把每个 chunk 的 choices/delta 原样写进 raw；
+        # 只保留合并后的 message / usage / chunk 数量等摘要信息。非流式时才写完整 raw。
+        response_payload: dict[str, Any] = {
+            "statusCode": response.status_code,
+            "model": model_name,
+            "streamed": bool(stream),
+            "text": text,
+            "toolCalls": tool_calls,
+            "message": message,
+        }
+        if stream:
+            chunks_list = data.get("chunks") if isinstance(data, dict) else None
+            response_payload["streamChunkCount"] = len(chunks_list) if isinstance(chunks_list, list) else 0
+            response_payload["usage"] = data.get("usage") if isinstance(data, dict) else {}
+        else:
+            response_payload["raw"] = data
         log_stage(
             f"llm.response.{purpose}",
-            {
-                "statusCode": response.status_code,
-                "model": model_name,
-                "text": text,
-                "toolCalls": tool_calls,
-                "message": message,
-                "raw": data,
-            },
+            response_payload,
             enabled=settings.debug_runtime_logs,
             max_chars=settings.debug_log_max_chars,
             max_string_chars=settings.debug_log_max_string_chars,
         )
+        usage_payload = data.get("usage") if isinstance(data, dict) else None
         return {
             "model_name": model_name,
             "text": text,
             "message": message,
             "tool_calls": tool_calls,
+            "usage": usage_payload if isinstance(usage_payload, dict) else {},
             "raw": data,
         }
     except requests.RequestException as exc:

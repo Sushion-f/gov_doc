@@ -1,14 +1,14 @@
 <script setup>
 import { computed, nextTick, ref, watch } from "vue";
-import { useRouter } from "vue-router";
-import CliPanel from "@/components/CliPanel.vue";
 import CloudFilePicker from "@/components/CloudFilePicker.vue";
 import ComposerDock from "@/components/ComposerDock.vue";
+import ConversationPlanStrip from "@/components/ConversationPlanStrip.vue";
 import EditorPreview from "@/components/EditorPreview.vue";
 import HomeHero from "@/components/HomeHero.vue";
 import MessageStream from "@/components/MessageStream.vue";
 import {
   abortCurrentRun,
+  compactConversation,
   homeQuickSkills,
   recommendationPrompts,
   runConversation,
@@ -17,21 +17,35 @@ import {
 } from "@/store";
 
 const prompt = ref("");
-const openedArtifactId = ref("");
 const selectedModel = ref("");
 const uploadedAttachments = ref([]);
 const showCloudPicker = ref(false);
-const router = useRouter();
 const chatSurface = ref(null);
-const cliPanelRef = ref(null);
-const cliOpen = ref(false);
+const drawerTarget = ref(null);
 
 const currentMessages = computed(() => state.currentConversation?.messages || []);
 const currentArtifacts = computed(() => state.currentConversation?.artifacts || []);
 const currentPromptMenu = computed(() => state.currentConversation?.pendingPromptMenu || state.pendingPromptMenu);
-const currentArtifact = computed(() =>
-  currentArtifacts.value.find((item) => item.id === openedArtifactId.value) || null
-);
+const currentTodoList = computed(() => state.currentConversation?.latestTodoList || state.latestTodoList);
+const currentWaitingInput = computed(() => {
+  if (!currentPromptMenu.value) {
+    return null;
+  }
+  if (currentPromptMenu.value.promptMenu) {
+    return currentPromptMenu.value;
+  }
+  return {
+    question: currentPromptMenu.value.question || currentPromptMenu.value.description || "",
+    missing_fields: (currentPromptMenu.value.missingItems || []).map((item, index) => ({
+      key: `missing_${index + 1}`,
+      label: item,
+      hint: item,
+    })),
+    options: currentPromptMenu.value.options || [],
+    promptMenu: currentPromptMenu.value,
+  };
+});
+const currentArtifact = computed(() => drawerTarget.value);
 const currentAnnotations = computed(() => {
   const latestAssistant = [...currentMessages.value].reverse().find((item) => item.role === "assistant");
   return latestAssistant?.annotations || [];
@@ -107,23 +121,68 @@ function clearQuickSkill() {
 }
 
 function openArtifact(artifact) {
-  if (artifact?.workspaceNodeId) {
-    router.push({ name: "editor", params: { id: artifact.workspaceNodeId } });
-    return;
-  }
-  openedArtifactId.value = artifact.id;
+  drawerTarget.value = artifact;
 }
 
 function closeArtifact() {
-  openedArtifactId.value = "";
+  drawerTarget.value = null;
 }
 
-function handleRegenerate() {
+function stripHtml(html) {
+  return String(html || "")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/(p|div|li|h[1-6]|blockquote|tr)>/gi, "\n")
+    .replace(/<[^>]+>/g, "")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function latestAssistantSummary(message) {
+  const text = stripHtml(message?.contentHtml || message?.content || "");
+  if (!text) {
+    return "";
+  }
+  return text.length > 600 ? `${text.slice(0, 599).trim()}…` : text;
+}
+
+async function handleRegenerate() {
   const lastUser = [...currentMessages.value].reverse().find((item) => item.role === "user");
-  if (!lastUser) {
+  const lastAssistant = [...currentMessages.value].reverse().find((item) => item.role === "assistant");
+  if (!lastUser || !lastAssistant) {
     return;
   }
-  handleSubmit(lastUser.content);
+  const effectiveGoal = lastUser?.meta?.effectiveGoal || lastUser?.content || "";
+  const latestArtifacts = (currentArtifacts.value || []).slice(-3).map((artifact) => ({
+    id: artifact.id,
+    artifactType: artifact.artifactType,
+    title: artifact.title,
+    summary: artifact.summary,
+    contentHtml: artifact.contentHtml,
+    workspaceNodeId: artifact.workspaceNodeId,
+    relativePath: artifact.relativePath || artifact?.meta?.relativePath || null,
+    versionPath: artifact.versionPath || artifact?.meta?.versionPath || null,
+    sourceSkill: artifact.sourceSkill || artifact?.meta?.sourceSkill || null,
+    sourceState: artifact.sourceState || artifact?.meta?.sourceState || null,
+    status: artifact.status || artifact?.meta?.status || null,
+    errorDetail: artifact.errorDetail || artifact?.meta?.errorDetail || null,
+  }));
+  await runConversation({
+    content: "重新生成",
+    model: currentModel.value,
+    skill: state.activeQuickSkill || null,
+    attachments: uploadedAttachments.value,
+    operationContext: {
+      intentType: "regenerate",
+      rewriteMode: "regenerate",
+      baseUserGoal: effectiveGoal,
+      latestAssistantSummary: latestAssistantSummary(lastAssistant),
+      latestArtifactRefs: latestArtifacts,
+    },
+  });
 }
 
 async function handleLocalUpload(event) {
@@ -137,7 +196,10 @@ async function handleLocalUpload(event) {
     {
       nodeId: result.id,
       name: result.name,
+      title: result.name,
+      fileType: result.fileType || "document",
       source: "workspace_upload",
+      sourceLabel: result.editable === false ? "只读预览 · 保存将另存 DOCX" : "本地上传 · 点击打开编辑",
     },
   ];
   event.target.value = "";
@@ -163,9 +225,20 @@ function onCloudPickerConfirm(items) {
       nodeId: item.id,
       name: item.name,
       source: "workspace",
+      sourceLabel: "云盘文件",
     });
   }
   uploadedAttachments.value = next;
+}
+
+function openAttachmentDrawer(item) {
+  drawerTarget.value = {
+    id: item.nodeId || item.id,
+    title: item.title || item.name,
+    summary: item.summary || item.sourceLabel || "工作区附件",
+    workspaceNodeId: item.workspaceNodeId || item.nodeId || item.id,
+    artifactType: item.fileType || "document",
+  };
 }
 
 function removeAttachment(item) {
@@ -196,15 +269,15 @@ watch(
   }
 );
 
-function onSuggestCli() {
-  cliOpen.value = true;
-  nextTick(() => {
-    cliPanelRef.value?.runLs?.();
-  });
-}
-
 function onAbortRun() {
   abortCurrentRun();
+}
+
+async function handleCompactContext() {
+  if (!state.currentConversationId || state.runLoading) {
+    return;
+  }
+  await compactConversation(state.currentConversationId);
 }
 </script>
 
@@ -233,28 +306,20 @@ function onAbortRun() {
           :planner-streaming-text="state.streamingPlannerReasoning"
           @open-artifact="openArtifact"
           @regenerate="handleRegenerate"
-          @suggest-cli="onSuggestCli"
         />
       </div>
 
-      <div class="cli-panel-bar">
-        <button
-          class="cli-toggle"
-          type="button"
-          :aria-expanded="cliOpen"
-          aria-label="命令行"
-          @click="cliOpen = !cliOpen"
-        >
-          <span class="material-symbols-rounded">terminal</span>
-          命令行
-        </button>
-      </div>
-      <CliPanel v-show="cliOpen" ref="cliPanelRef" />
+      <ConversationPlanStrip
+        :todo-list="currentTodoList"
+        :waiting-input="currentWaitingInput"
+      />
 
       <ComposerDock
         v-model:prompt="prompt"
         :prompt-menu="currentPromptMenu"
         :loading="state.runLoading"
+        :context-usage="state.contextUsage"
+        :compaction-history="state.compactionHistory || []"
         :model-options="state.modelOptions"
         :current-model="currentModel"
         :uploaded-attachments="uploadedAttachments"
@@ -266,9 +331,11 @@ function onAbortRun() {
         @local-upload="handleLocalUpload"
         @cloud-select="handleCloudSelect"
         @remove-attachment="removeAttachment"
+        @open-attachment="openAttachmentDrawer"
         @select-model="pickModel"
         @prompt-submit="handlePromptMenuSubmit"
         @abort="onAbortRun"
+        @compact-context="handleCompactContext"
       />
     </section>
   </div>

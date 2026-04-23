@@ -96,6 +96,7 @@ function handleLogout() {
   state.currentConversationId = null;
   state.currentConversation = null;
   state.currentEvents = [];
+  state.latestTodoList = null;
   state.activeQuickSkill = "";
   state.errorMessage = "已退出当前会话。";
   router.push({ name: "home" });

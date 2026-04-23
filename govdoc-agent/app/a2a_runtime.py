@@ -259,6 +259,12 @@ def build_subtask_packet(
     runtime_context_summary: str,
     user_memory_refs: list[str],
     handoff_trace: list[dict[str, Any]],
+    operation_type: str | None = None,
+    rewrite_mode: str | None = None,
+    base_user_goal: str | None = None,
+    latest_assistant_summary: str | None = None,
+    latest_artifact_refs: list[dict[str, Any]] | None = None,
+    attachment_context: list[dict[str, Any]] | None = None,
 ) -> TaskPacket:
     team_id = "leader-agent-direct" if step.subtask_role == "main_agent" else f"sub-agent-{step.skill_name}"
     return TaskPacket(
@@ -283,6 +289,12 @@ def build_subtask_packet(
             "runningContextSummary": runtime_context_summary,
             "handoffTrace": handoff_trace,
             "dependsOn": step.depends_on,
+            "operationType": operation_type,
+            "rewriteMode": rewrite_mode,
+            "baseUserGoal": base_user_goal,
+            "latestAssistantSummary": latest_assistant_summary,
+            "latestArtifactRefs": latest_artifact_refs or [],
+            "attachmentContext": attachment_context or [],
         },
         attachments=attachments,
         acceptance_criteria=[

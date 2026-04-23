@@ -1,11 +1,19 @@
+"""Adapter: 每个 skill 只走 MD 配方 + LLM。
+
+legacy HTTP 调用已在 2026-04 整改中整体移除。sub-agent 的系统提示通过
+``agents/`` 注册表与 ``prompts/sub/*.md``、或 ``skills_store/<name>/SKILL.md``
+上传覆盖文件共同决定；执行路径只保留「加载 prompt → 调 LLM → 按 skill 类型
+归一化 render_blocks / artifacts / annotations」三步。
+"""
+
+from __future__ import annotations
+
 import json
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from html import escape
 from typing import Any
-
-import requests
 
 from agents import (
     canonical_agent_name,
@@ -14,8 +22,10 @@ from agents import (
     prompt_key_for_agent,
 )
 from .config import settings
+from .context_usage import record_usage as record_api_usage
 from .debug_log import log_stage, mask_cookie
 from .llm import LLMCallError, call_chat_model, resolve_model_name, text_to_html
+from .skills_registry import get_skill_overlay
 
 
 @dataclass
@@ -31,165 +41,23 @@ class SkillExecutionResult:
     reasoning_content: str | None = None
 
 
-@dataclass
-class LegacyCallResult:
-    ok: bool
-    url: str
-    status_code: int | None = None
-    payload: dict | list | None = None
-    text: str | None = None
-    error: str | None = None
-
-
 def skill_descriptors() -> list[dict]:
-    return exposed_agent_descriptors()
+    descriptors = exposed_agent_descriptors()
+    for descriptor in descriptors:
+        overlay = get_skill_overlay(descriptor.get("key") or "")
+        if overlay:
+            if overlay.display_name:
+                descriptor["title"] = overlay.display_name
+            if overlay.description:
+                descriptor["summary"] = overlay.description
+            if overlay.tools:
+                descriptor["tools"] = overlay.tools
+            descriptor["customized"] = True
+    return descriptors
 
 
 def resolve_skill(content: str, requested_skill: str | None = None) -> str:
     return canonical_agent_name(requested_skill) or "general"
-
-
-def _legacy_base_url() -> str:
-    return settings.legacy_service_base_url or settings.legacy_auth_base_url
-
-
-def _read_sse_text(response: requests.Response) -> str:
-    enc = (response.encoding or "").lower()
-    if not enc or enc in ("iso-8859-1", "latin-1"):
-        response.encoding = "utf-8"
-    chunks: list[str] = []
-    for raw in response.iter_lines(decode_unicode=False):
-        if not raw:
-            continue
-        try:
-            line = raw.decode("utf-8").strip()
-        except UnicodeDecodeError:
-            line = raw.decode("utf-8", errors="replace").strip()
-        if line.startswith("data:"):
-            payload = line[5:].strip()
-            if payload == "[DONE]":
-                continue
-            chunks.append(payload)
-        else:
-            chunks.append(line)
-    return "\n".join(chunks).strip()
-
-
-def _try_legacy_json(path: str, payload: dict, cookies: str | None = None) -> LegacyCallResult:
-    base = _legacy_base_url()
-    if not base:
-        log_stage(
-            "skill.legacy_json.skip",
-            {"path": path, "reason": "legacy_base_url_missing"},
-            enabled=settings.debug_runtime_logs,
-            max_chars=settings.debug_log_max_chars,
-            max_string_chars=settings.debug_log_max_string_chars,
-        )
-        return LegacyCallResult(False, path, error="legacy_base_url_missing")
-    url = f"{base}{path}"
-    try:
-        log_stage(
-            "skill.legacy_json.request",
-            {
-                "url": url,
-                "payload": payload,
-                "cookiePreview": mask_cookie(cookies),
-            },
-            enabled=settings.debug_runtime_logs,
-            max_chars=settings.debug_log_max_chars,
-            max_string_chars=settings.debug_log_max_string_chars,
-        )
-        response = requests.post(
-            url,
-            json=payload,
-            headers={"Cookie": cookies or ""},
-            timeout=20,
-        )
-        response.raise_for_status()
-        data = response.json()
-        log_stage(
-            "skill.legacy_json.response",
-            {
-                "url": url,
-                "statusCode": response.status_code,
-                "body": data,
-            },
-            enabled=settings.debug_runtime_logs,
-            max_chars=settings.debug_log_max_chars,
-            max_string_chars=settings.debug_log_max_string_chars,
-        )
-        return LegacyCallResult(True, url, status_code=response.status_code, payload=data)
-    except (requests.RequestException, ValueError) as exc:
-        log_stage(
-            "skill.legacy_json.error",
-            {
-                "url": url,
-                "error": str(exc),
-            },
-            enabled=settings.debug_runtime_logs,
-            max_chars=settings.debug_log_max_chars,
-            max_string_chars=settings.debug_log_max_string_chars,
-        )
-        return LegacyCallResult(False, url, error=str(exc))
-
-
-def _try_legacy_stream(path: str, payload: dict, cookies: str | None = None) -> LegacyCallResult:
-    base = _legacy_base_url()
-    if not base:
-        log_stage(
-            "skill.legacy_stream.skip",
-            {"path": path, "reason": "legacy_base_url_missing"},
-            enabled=settings.debug_runtime_logs,
-            max_chars=settings.debug_log_max_chars,
-            max_string_chars=settings.debug_log_max_string_chars,
-        )
-        return LegacyCallResult(False, path, error="legacy_base_url_missing")
-    url = f"{base}{path}"
-    try:
-        log_stage(
-            "skill.legacy_stream.request",
-            {
-                "url": url,
-                "payload": payload,
-                "cookiePreview": mask_cookie(cookies),
-            },
-            enabled=settings.debug_runtime_logs,
-            max_chars=settings.debug_log_max_chars,
-            max_string_chars=settings.debug_log_max_string_chars,
-        )
-        response = requests.post(
-            url,
-            json=payload,
-            headers={"Cookie": cookies or ""},
-            timeout=40,
-            stream=True,
-        )
-        response.raise_for_status()
-        text = _read_sse_text(response)
-        log_stage(
-            "skill.legacy_stream.response",
-            {
-                "url": url,
-                "statusCode": response.status_code,
-                "text": text,
-            },
-            enabled=settings.debug_runtime_logs,
-            max_chars=settings.debug_log_max_chars,
-            max_string_chars=settings.debug_log_max_string_chars,
-        )
-        return LegacyCallResult(True, url, status_code=response.status_code, text=text or None)
-    except requests.RequestException as exc:
-        log_stage(
-            "skill.legacy_stream.error",
-            {
-                "url": url,
-                "error": str(exc),
-            },
-            enabled=settings.debug_runtime_logs,
-            max_chars=settings.debug_log_max_chars,
-            max_string_chars=settings.debug_log_max_string_chars,
-        )
-        return LegacyCallResult(False, url, error=str(exc))
 
 
 def _invoke_llm(
@@ -202,7 +70,8 @@ def _invoke_llm(
     *,
     on_text_delta: Callable[[str, str], None] | None = None,
 ) -> tuple[str, str, str | None, str | None]:
-    """始终调用远程 LLM（OpenAI 兼容接口）。失败返回 model_error 与错误信息，不再使用本地模板兜底。"""
+    """调用远程 LLM（OpenAI 兼容接口）。成功返回 (text, "model_success", None, reasoning)；
+    失败返回 (user_text, "model_error", error_detail, None)。失败时不再触发任何 legacy fallback。"""
     resolved_model = resolve_model_name(requested_model)
 
     def _stream_handler(ev: dict[str, Any]) -> None:
@@ -229,6 +98,23 @@ def _invoke_llm(
         )
         text = response["text"]
         reasoning_content = (response.get("message") or {}).get("reasoning_content")
+        conversation_id = None
+        if isinstance(task_packet, dict):
+            conversation_id = (
+                task_packet.get("conversation_id")
+                or task_packet.get("conversationId")
+            )
+        if conversation_id is None and isinstance(runtime_context, dict):
+            conversation_id = (
+                runtime_context.get("conversation_id")
+                or runtime_context.get("conversationId")
+            )
+        if conversation_id:
+            record_api_usage(
+                str(conversation_id),
+                response.get("usage") if isinstance(response, dict) else None,
+                model_name=resolved_model,
+            )
         log_stage(
             "skill.llm.remote_ok",
             {
@@ -269,7 +155,7 @@ def _invoke_llm(
 
 
 def _build_annotations_from_lines(lines: list[str]) -> list[dict]:
-    annotations = []
+    annotations: list[dict] = []
     for index, line in enumerate(lines, start=1):
         text = line.strip(" -")
         if not text:
@@ -286,10 +172,274 @@ def _build_annotations_from_lines(lines: list[str]) -> list[dict]:
     return annotations
 
 
-def _normalized_source(source_state: str) -> str:
-    if not source_state:
-        return "unknown"
-    return source_state
+def _try_parse_json_from_text(text: str) -> dict | list | None:
+    raw = (text or "").strip()
+    if not raw:
+        return None
+    candidates = [raw]
+    if "```" in raw:
+        fenced = raw.split("```")
+        for part in fenced:
+            stripped = part.strip()
+            if stripped.startswith("json"):
+                stripped = stripped[4:].strip()
+            if stripped.startswith(("{", "[")):
+                candidates.append(stripped)
+    brace_start = raw.find("{")
+    brace_end = raw.rfind("}")
+    if brace_start >= 0 and brace_end > brace_start:
+        candidates.append(raw[brace_start : brace_end + 1])
+    bracket_start = raw.find("[")
+    bracket_end = raw.rfind("]")
+    if bracket_start >= 0 and bracket_end > bracket_start:
+        candidates.append(raw[bracket_start : bracket_end + 1])
+    for candidate in candidates:
+        try:
+            value = json.loads(candidate)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(value, (dict, list)):
+            return value
+    return None
+
+
+def _lines_of(text: str, limit: int = 8) -> list[str]:
+    return [item.strip("- ").strip() for item in (text or "").splitlines() if item.strip()][:limit]
+
+
+def _build_general_result(
+    text: str,
+    source_state: str,
+    error_detail: str | None,
+    reasoning_content: str | None,
+) -> SkillExecutionResult:
+    return SkillExecutionResult(
+        normalized_result={"text": text, "source": source_state},
+        render_blocks=[{"type": "general", "title": "通用回答", "html": text_to_html(text)}],
+        artifact_refs=[],
+        editor_annotations=[],
+        retryable=source_state == "model_error",
+        source_state=source_state,
+        error_detail=error_detail,
+        reasoning_content=reasoning_content,
+    )
+
+
+def _build_retrieval_result(
+    text: str,
+    source_state: str,
+    error_detail: str | None,
+    reasoning_content: str | None,
+) -> SkillExecutionResult:
+    parsed = _try_parse_json_from_text(text) if source_state == "model_success" else None
+    if isinstance(parsed, dict) and isinstance(parsed.get("items"), list):
+        items = parsed["items"]
+    elif isinstance(parsed, list):
+        items = parsed
+    else:
+        items = [{"title": "检索摘要", "summary": line} for line in _lines_of(text, limit=6)]
+    return SkillExecutionResult(
+        normalized_result={"items": items, "source": source_state},
+        render_blocks=[{"type": "summary", "title": "检索结果", "html": text_to_html(text)}],
+        artifact_refs=[],
+        editor_annotations=[],
+        retryable=source_state == "model_error",
+        source_state=source_state,
+        error_detail=error_detail,
+        reasoning_content=reasoning_content,
+    )
+
+
+def _build_writing_result(
+    text: str,
+    source_state: str,
+    error_detail: str | None,
+    reasoning_content: str | None,
+) -> SkillExecutionResult:
+    artifacts: list[dict] = []
+    if source_state == "model_success" and text.strip():
+        artifacts.append(
+            {
+                "artifactType": "document",
+                "title": "公文写作结果.docx",
+                "summary": "已生成可继续编辑的公文正文。",
+                "contentHtml": text_to_html(text),
+                "sourceSkill": "writing",
+                "sourceState": source_state,
+                "status": "ready",
+                "errorDetail": None,
+            }
+        )
+    return SkillExecutionResult(
+        normalized_result={"document": text, "source": source_state},
+        render_blocks=[{"type": "document", "title": "公文写作结果", "html": text_to_html(text)}],
+        artifact_refs=artifacts,
+        editor_annotations=[],
+        retryable=source_state == "model_error",
+        source_state=source_state,
+        error_detail=error_detail,
+        reasoning_content=reasoning_content,
+    )
+
+
+def _build_review_result(
+    text: str,
+    source_state: str,
+    error_detail: str | None,
+    reasoning_content: str | None,
+) -> SkillExecutionResult:
+    parsed = _try_parse_json_from_text(text) if source_state == "model_success" else None
+    if isinstance(parsed, dict) and isinstance(parsed.get("issues"), list):
+        issues = parsed["issues"]
+    elif isinstance(parsed, list):
+        issues = [item if isinstance(item, dict) else {"message": str(item)} for item in parsed]
+    else:
+        issues = [{"message": line} for line in _lines_of(text, limit=8)]
+    review_lines = [f"- {item.get('message') or item.get('errorWord') or json.dumps(item, ensure_ascii=False)}" for item in issues[:10]]
+    review_text = "\n".join(review_lines) or "- 暂未发现明显问题。"
+    annotations = _build_annotations_from_lines(
+        [item.get("message") or item.get("errorWord") or str(item) for item in issues[:10]]
+    )
+    artifacts = []
+    if source_state == "model_success":
+        artifacts.append(
+            {
+                "artifactType": "document",
+                "title": "审核修订建议.docx",
+                "summary": "已生成审核意见与修订建议。",
+                "contentHtml": text_to_html(review_text),
+                "sourceSkill": "review",
+                "sourceState": source_state,
+                "status": "ready",
+                "errorDetail": None,
+            }
+        )
+    return SkillExecutionResult(
+        normalized_result={"issues": issues, "source": source_state},
+        render_blocks=[{"type": "review", "title": "审核结论", "html": text_to_html(review_text)}],
+        artifact_refs=artifacts,
+        editor_annotations=annotations,
+        retryable=source_state == "model_error",
+        source_state=source_state,
+        error_detail=error_detail,
+        reasoning_content=reasoning_content,
+    )
+
+
+def _build_dedup_result(
+    text: str,
+    source_state: str,
+    error_detail: str | None,
+    reasoning_content: str | None,
+) -> SkillExecutionResult:
+    parsed = _try_parse_json_from_text(text) if source_state == "model_success" else None
+    if isinstance(parsed, dict) and isinstance(parsed.get("items"), list):
+        rows = parsed["items"]
+    elif isinstance(parsed, list):
+        rows = [item if isinstance(item, dict) else {"title": str(item)} for item in parsed]
+    else:
+        rows = [
+            {
+                "title": f"相似来源 {index}",
+                "duplicateRate": f"{min(20 + index * 7, 87)}%",
+                "duplicateSentence": line,
+                "sourceLink": "",
+            }
+            for index, line in enumerate(_lines_of(text, limit=5), start=1)
+        ]
+    report_lines = [
+        f"- {item.get('title', '相似来源')} | 重复率 "
+        f"{item.get('duplicateRate') or item.get('paperDuplicateRate') or '未知'}"
+        for item in rows[:8]
+    ]
+    report_text = "\n".join(report_lines) or "- 暂无查重结果。"
+    annotations = _build_annotations_from_lines(
+        [item.get("duplicateSentence") or item.get("title") or str(item) for item in rows[:8]]
+    )
+    artifacts: list[dict] = []
+    if source_state == "model_success":
+        artifacts.append(
+            {
+                "artifactType": "report",
+                "title": "查重报告.docx",
+                "summary": "已生成查重分析与改写建议。",
+                "contentHtml": text_to_html(report_text),
+                "sourceSkill": "dedup",
+                "sourceState": source_state,
+                "status": "ready",
+                "errorDetail": None,
+            }
+        )
+    return SkillExecutionResult(
+        normalized_result={"items": rows, "source": source_state},
+        render_blocks=[{"type": "duplicate", "title": "查重结果", "html": text_to_html(report_text)}],
+        artifact_refs=artifacts,
+        editor_annotations=annotations,
+        retryable=source_state == "model_error",
+        source_state=source_state,
+        error_detail=error_detail,
+        reasoning_content=reasoning_content,
+    )
+
+
+def _build_layout_result(
+    text: str,
+    source_state: str,
+    error_detail: str | None,
+    reasoning_content: str | None,
+) -> SkillExecutionResult:
+    parsed = _try_parse_json_from_text(text) if source_state == "model_success" else None
+    if isinstance(parsed, dict) and isinstance(parsed.get("templates"), list):
+        templates = parsed["templates"]
+    elif isinstance(parsed, list):
+        templates = [item if isinstance(item, dict) else {"templateTitle": str(item)} for item in parsed]
+    else:
+        lines = _lines_of(text, limit=6)
+        templates = [{"templateTitle": line, "documentType": "通用"} for line in lines]
+    if not templates:
+        templates = [
+            {"templateTitle": "党政机关标准版", "documentType": "通知"},
+            {"templateTitle": "汇报材料版", "documentType": "汇报"},
+        ]
+    template_lines = [
+        f"- 推荐模板：{item.get('templateTitle', '未命名模板')}（{item.get('documentType', '通用')}）"
+        for item in templates[:5]
+    ]
+    template_text = "\n".join(template_lines) or "- 暂无推荐模板。"
+    artifacts: list[dict] = []
+    if source_state == "model_success":
+        artifacts.append(
+            {
+                "artifactType": "document",
+                "title": "排版结果.docx",
+                "summary": "已输出推荐模板与排版建议。",
+                "contentHtml": text_to_html(template_text),
+                "sourceSkill": "layout",
+                "sourceState": source_state,
+                "status": "ready",
+                "errorDetail": None,
+            }
+        )
+    return SkillExecutionResult(
+        normalized_result={"templates": templates, "source": source_state},
+        render_blocks=[{"type": "format", "title": "排版建议", "html": text_to_html(template_text)}],
+        artifact_refs=artifacts,
+        editor_annotations=[],
+        retryable=source_state == "model_error",
+        source_state=source_state,
+        error_detail=error_detail,
+        reasoning_content=reasoning_content,
+    )
+
+
+_SKILL_BUILDERS: dict[str, Callable[..., SkillExecutionResult]] = {
+    "general": _build_general_result,
+    "retrieval": _build_retrieval_result,
+    "writing": _build_writing_result,
+    "review": _build_review_result,
+    "dedup": _build_dedup_result,
+    "layout": _build_layout_result,
+}
 
 
 def _execute_skill_once(
@@ -303,12 +453,12 @@ def _execute_skill_once(
     task_packet: dict | None = None,
     on_text_delta: Callable[[str, str], None] | None = None,
 ) -> SkillExecutionResult:
-    skill_name = canonical_agent_name(skill_name) or "general"
-    prompt = content.strip()
+    canonical_name = canonical_agent_name(skill_name) or "general"
+    prompt = (content or "").strip()
     log_stage(
         "skill.execute.start",
         {
-            "skill": skill_name,
+            "skill": canonical_name,
             "content": content,
             "requestedModel": requested_model,
             "attachments": attachments,
@@ -319,317 +469,88 @@ def _execute_skill_once(
         max_string_chars=settings.debug_log_max_string_chars,
     )
 
-    if skill_name == "general":
-        text, source_state, error_detail, reasoning_content = _invoke_llm(
-            prompt,
-            skill_name,
-            requested_model,
-            runtime_context,
-            memory_context,
-            task_packet,
-            on_text_delta=on_text_delta,
-        )
-        result = SkillExecutionResult(
-            {"text": text, "source": _normalized_source(source_state)},
-            [{"type": "general", "title": "通用回答", "html": text_to_html(text)}],
-            [],
-            [],
-            source_state == "model_error",
-            source_state=source_state,
-            error_detail=error_detail,
-            reasoning_content=reasoning_content,
-        )
-        log_stage(
-            "skill.execute.result",
-            {"skill": skill_name, "result": result},
-            enabled=settings.debug_runtime_logs,
-            max_chars=settings.debug_log_max_chars,
-            max_string_chars=settings.debug_log_max_string_chars,
-        )
-        return result
-
-    if skill_name == "retrieval":
-        legacy = _try_legacy_json(
-            "/report-agent/v1/document-material-retrieval",
-            {"query": prompt, "text": prompt, "keyword": prompt},
-            cookies,
-        )
-        if legacy.ok:
-            body = legacy.payload if isinstance(legacy.payload, dict) else {}
-            items = body.get("data") or body.get("rows") or body.get("list") or []
-            normalized = {"items": items, "source": _normalized_source("legacy_success")}
-            render_blocks = [
-                {"type": "summary", "title": "检索结果", "html": text_to_html(json.dumps(items[:5], ensure_ascii=False))}
-            ]
-            result = SkillExecutionResult(
-                normalized,
-                render_blocks,
-                [],
-                [],
-                False,
-                source_state="legacy_success",
-            )
-            log_stage(
-                "skill.execute.result",
-                {"skill": skill_name, "result": result},
-                enabled=settings.debug_runtime_logs,
-                max_chars=settings.debug_log_max_chars,
-                max_string_chars=settings.debug_log_max_string_chars,
-            )
-            return result
-
-        text, fallback_state, fallback_error, reasoning_content = _invoke_llm(
-            prompt,
-            skill_name,
-            requested_model,
-            runtime_context,
-            memory_context,
-            task_packet,
-            on_text_delta=on_text_delta,
-        )
-        items = [
-            {"title": "检索摘要", "summary": line}
-            for line in [part.strip("- ").strip() for part in text.splitlines() if part.strip()][:5]
-        ]
-        result = SkillExecutionResult(
-            {"items": items, "source": _normalized_source(fallback_state)},
-            [{"type": "summary", "title": "检索结果", "html": text_to_html(text)}],
-            [],
-            [],
-            True,
-            source_state=fallback_state,
-            error_detail=legacy.error or fallback_error,
-            reasoning_content=reasoning_content,
-        )
-        log_stage(
-            "skill.execute.result",
-            {"skill": skill_name, "result": result},
-            enabled=settings.debug_runtime_logs,
-            max_chars=settings.debug_log_max_chars,
-            max_string_chars=settings.debug_log_max_string_chars,
-        )
-        return result
-
-    if skill_name == "writing":
-        legacy_text = _try_legacy_stream(
-            "/report-agent/v1/document-writing",
-            {"title": prompt[:20], "text": prompt, "prompt": prompt, "content": prompt},
-            cookies,
-        )
-        if legacy_text.ok and legacy_text.text:
-            text = legacy_text.text
-            source_state = "legacy_success"
-            error_detail = None
-            reasoning_content = None
-        else:
-            text, source_state, error_detail, reasoning_content = _invoke_llm(
-                prompt,
-                skill_name,
-                requested_model,
-                runtime_context,
-                memory_context,
-                task_packet,
-                on_text_delta=on_text_delta,
-            )
-        result = SkillExecutionResult(
-            {"document": text, "source": _normalized_source(source_state)},
-            [{"type": "document", "title": "公文写作结果", "html": text_to_html(text)}],
-            [
-                {
-                    "artifact_type": "document",
-                    "title": "公文写作结果.docx",
-                    "summary": "已生成可继续编辑的公文正文。",
-                    "content_html": text_to_html(text),
-                }
-            ],
-            [],
-            source_state != "legacy_success",
-            source_state=source_state,
-            error_detail=legacy_text.error or error_detail,
-            reasoning_content=reasoning_content,
-        )
-        log_stage(
-            "skill.execute.result",
-            {"skill": skill_name, "result": result},
-            enabled=settings.debug_runtime_logs,
-            max_chars=settings.debug_log_max_chars,
-            max_string_chars=settings.debug_log_max_string_chars,
-        )
-        return result
-
-    if skill_name == "review":
-        legacy = _try_legacy_json(
-            "/report-agent/v2/small_model_review",
-            {"text": prompt, "model_name": resolve_model_name(requested_model)},
-            cookies,
-        )
-        issues = []
-        if legacy.ok and isinstance(legacy.payload, dict) and isinstance(legacy.payload.get("data"), dict):
-            issues = legacy.payload["data"].get("resultList") or []
-        if not issues:
-            text, fallback_state, fallback_error, reasoning_content = _invoke_llm(
-                prompt,
-                skill_name,
-                requested_model,
-                runtime_context,
-                memory_context,
-                task_packet,
-                on_text_delta=on_text_delta,
-            )
-            issue_lines = [line for line in text.splitlines() if line.strip()]
-            issues = [{"message": line.strip()} for line in issue_lines[:8]]
-            source_state = fallback_state
-            error_detail = legacy.error or fallback_error
-        else:
-            source_state = "legacy_success"
-            error_detail = None
-            reasoning_content = None
-        annotations = _build_annotations_from_lines([item.get("message") or item.get("errorWord") or str(item) for item in issues[:10]])
-        review_text = "\n".join(
-            [f"- {item.get('message') or item.get('errorWord') or str(item)}" for item in issues[:10]]
-        ) or "- 暂未发现明显问题。"
-        result = SkillExecutionResult(
-            {"issues": issues, "source": _normalized_source(source_state)},
-            [{"type": "review", "title": "审核结论", "html": text_to_html(review_text)}],
-            [
-                {
-                    "artifact_type": "document",
-                    "title": "审核修订建议.docx",
-                    "summary": "已生成审核意见与修订建议。",
-                    "content_html": text_to_html(review_text),
-                }
-            ],
-            annotations,
-            source_state != "legacy_success",
-            source_state=source_state,
-            error_detail=error_detail,
-            reasoning_content=reasoning_content,
-        )
-        log_stage(
-            "skill.execute.result",
-            {"skill": skill_name, "result": result},
-            enabled=settings.debug_runtime_logs,
-            max_chars=settings.debug_log_max_chars,
-            max_string_chars=settings.debug_log_max_string_chars,
-        )
-        return result
-
-    if skill_name == "dedup":
-        legacy = _try_legacy_json(
-            "/api/v1/duplication-check/internet",
-            {"text": prompt, "content": prompt},
-            cookies,
-        )
-        rows = []
-        if legacy.ok and isinstance(legacy.payload, dict):
-            rows = legacy.payload.get("data") or legacy.payload.get("items") or []
-        if not rows:
-            text, fallback_state, fallback_error, reasoning_content = _invoke_llm(
-                prompt,
-                skill_name,
-                requested_model,
-                runtime_context,
-                memory_context,
-                task_packet,
-                on_text_delta=on_text_delta,
-            )
-            rows = [
-                {
-                    "title": f"相似来源 {index}",
-                    "duplicateRate": f"{min(20 + index * 7, 87)}%",
-                    "duplicateSentence": line.strip("- ").strip(),
-                    "sourceLink": "",
-                }
-                for index, line in enumerate([item for item in text.splitlines() if item.strip()][:5], start=1)
-            ]
-            source_state = fallback_state
-            error_detail = legacy.error or fallback_error
-        else:
-            source_state = "legacy_success"
-            error_detail = None
-            reasoning_content = None
-        report_text = "\n".join(
-            [
-                f"- {item.get('title', '相似来源')} | 重复率 {item.get('duplicateRate') or item.get('paperDuplicateRate') or '未知'}"
-                for item in rows[:8]
-            ]
-        ) or "- 暂无查重结果。"
-        annotations = _build_annotations_from_lines(
-            [item.get("duplicateSentence") or item.get("title") or str(item) for item in rows[:8]]
-        )
-        result = SkillExecutionResult(
-            {"items": rows, "source": _normalized_source(source_state)},
-            [{"type": "duplicate", "title": "查重结果", "html": text_to_html(report_text)}],
-            [
-                {
-                    "artifact_type": "report",
-                    "title": "查重报告.docx",
-                    "summary": "已生成查重分析与改写建议。",
-                    "content_html": text_to_html(report_text),
-                }
-            ],
-            annotations,
-            source_state != "legacy_success",
-            source_state=source_state,
-            error_detail=error_detail,
-            reasoning_content=reasoning_content,
-        )
-        log_stage(
-            "skill.execute.result",
-            {"skill": skill_name, "result": result},
-            enabled=settings.debug_runtime_logs,
-            max_chars=settings.debug_log_max_chars,
-            max_string_chars=settings.debug_log_max_string_chars,
-        )
-        return result
-
-    if skill_name != "layout":
-        raise ValueError(f"未知 skill: {skill_name}")
-
-    legacy_templates = _try_legacy_json("/report-agent/v2/layoutTemplate/getOptionLayout", {}, cookies)
-    templates = []
-    if legacy_templates.ok and isinstance(legacy_templates.payload, dict):
-        templates = legacy_templates.payload.get("data") or legacy_templates.payload.get("rows") or []
-    if not templates:
-        templates = [
-            {"templateTitle": "党政机关标准版", "documentType": "通知"},
-            {"templateTitle": "汇报材料版", "documentType": "汇报"},
-        ]
-        source_state = "static_template"
-        error_detail = legacy_templates.error
-    else:
-        source_state = "legacy_success"
-        error_detail = None
-    template_lines = [
-        f"- 推荐模板：{item.get('templateTitle', '未命名模板')}（{item.get('documentType', '通用')}）"
-        for item in templates[:5]
-    ]
-    template_text = "\n".join(template_lines)
-    result = SkillExecutionResult(
-        {"templates": templates, "source": _normalized_source(source_state)},
-        [{"type": "format", "title": "排版建议", "html": text_to_html(template_text)}],
-        [
-            {
-                "artifact_type": "document",
-                "title": "排版结果.docx",
-                "summary": "已输出推荐模板与排版建议。",
-                "content_html": text_to_html(template_text),
-            }
-        ],
-        [],
-        source_state != "legacy_success",
-        source_state=source_state,
-        error_detail=error_detail,
-        reasoning_content=None,
+    builder = _SKILL_BUILDERS.get(canonical_name, _build_general_result)
+    text, source_state, error_detail, reasoning_content = _invoke_llm(
+        prompt,
+        canonical_name,
+        requested_model,
+        runtime_context,
+        memory_context,
+        task_packet,
+        on_text_delta=on_text_delta,
     )
+    result = builder(text, source_state, error_detail, reasoning_content)
     log_stage(
         "skill.execute.result",
-        {"skill": skill_name, "result": result},
+        {"skill": canonical_name, "result": result},
         enabled=settings.debug_runtime_logs,
         max_chars=settings.debug_log_max_chars,
         max_string_chars=settings.debug_log_max_string_chars,
     )
     return result
+
+
+_SKILL_OUTPUT_MIN_SCHEMA: dict[str, dict] = {
+    # 每个 skill 的最小输出契约，validate 返回 (ok, reason)
+    "writing": {"kind": "text", "field": "document", "min_len": 40},
+    "general": {"kind": "text", "field": "text", "min_len": 1},
+    "retrieval": {"kind": "list", "field": "items", "min_items": 1},
+    "review": {"kind": "list", "field": "issues", "min_items": 0},
+    "dedup": {"kind": "list", "field": "items", "min_items": 0},
+    "layout": {"kind": "list", "field": "templates", "min_items": 1},
+}
+
+
+def _looks_like_clarification_response(text: str) -> bool:
+    stripped = str(text or "").strip()
+    if not stripped:
+        return False
+    markers = (
+        "请补充",
+        "请说明",
+        "请提供",
+        "请确认",
+        "请告知",
+        "为了更好地帮助您",
+        "我没有看到之前的对话上下文",
+    )
+    if any(marker in stripped for marker in markers):
+        return True
+    return stripped.endswith(("？", "?"))
+
+
+def _writing_has_core_goal(content: str) -> bool:
+    text = str(content or "").strip()
+    if len(text) < 6:
+        return False
+    doc_markers = ("通知", "报告", "请示", "函", "总结", "汇报", "方案", "讲话稿", "发言稿", "公文")
+    action_markers = ("起草", "写", "撰写", "生成", "拟一份", "草拟")
+    if any(marker in text for marker in ("国庆", "春节", "放假", "营商环境", "整改", "会议", "培训", "检查")):
+        return True
+    return any(marker in text for marker in doc_markers) and any(marker in text for marker in action_markers)
+
+
+def _validate_skill_output(skill_name: str, result: SkillExecutionResult) -> tuple[bool, str]:
+    spec = _SKILL_OUTPUT_MIN_SCHEMA.get(skill_name)
+    if not spec:
+        return True, ""
+    data = result.normalized_result or {}
+    field = spec.get("field") or ""
+    if spec.get("kind") == "text":
+        value = str(data.get(field) or "").strip()
+        if len(value) < int(spec.get("min_len") or 1):
+            return False, f"字段 `{field}` 输出过短或缺失"
+        if skill_name == "writing" and _looks_like_clarification_response(value):
+            return False, "写作结果仍在追问补充信息"
+        return True, ""
+    if spec.get("kind") == "list":
+        value = data.get(field)
+        if not isinstance(value, list):
+            return False, f"字段 `{field}` 不是列表"
+        if len(value) < int(spec.get("min_items") or 0):
+            return False, f"字段 `{field}` 条目数过少"
+        return True, ""
+    return True, ""
 
 
 def execute_skill(
@@ -643,9 +564,13 @@ def execute_skill(
     task_packet: dict | None = None,
     on_text_delta: Callable[[str, str], None] | None = None,
 ) -> SkillExecutionResult:
-    """执行 skill；model_error 时自动重试 1 次（间隔 0.5s）。"""
+    """执行 skill。
+    - `model_error` 时自动重试 1 次（间隔 0.5s）；
+    - 输出 schema 校验失败时，按 `subagent_max_output_retries` 重新下发一次严格指令。
+    """
+    canonical = canonical_agent_name(skill_name) or "general"
     first = _execute_skill_once(
-        skill_name,
+        canonical,
         content,
         requested_model,
         attachments,
@@ -657,8 +582,8 @@ def execute_skill(
     )
     if first.source_state == "model_error":
         time.sleep(0.5)
-        return _execute_skill_once(
-            skill_name,
+        first = _execute_skill_once(
+            canonical,
             content,
             requested_model,
             attachments,
@@ -668,16 +593,74 @@ def execute_skill(
             task_packet=task_packet,
             on_text_delta=on_text_delta,
         )
+
+    max_retries = max(0, int(getattr(settings, "subagent_max_output_retries", 0) or 0))
+    for attempt in range(max_retries):
+        if first.source_state == "model_error":
+            break
+        ok, reason = _validate_skill_output(canonical, first)
+        if ok:
+            break
+        log_stage(
+            "skill.output_schema_invalid",
+            {
+                "skill": canonical,
+                "reason": reason,
+                "attempt": attempt + 1,
+                "maxRetries": max_retries,
+            },
+            enabled=settings.debug_runtime_logs,
+            max_chars=settings.debug_log_max_chars,
+            max_string_chars=settings.debug_log_max_string_chars,
+        )
+        strict_suffix = (
+            f"\n\n[严格输出要求] 上一次输出不符合 schema（{reason}）。"
+            "请仅输出 JSON / 结构化正文，严格按照 skill 约定的字段。"
+        )
+        first = _execute_skill_once(
+            canonical,
+            content + strict_suffix,
+            requested_model,
+            attachments,
+            cookies,
+            runtime_context=runtime_context,
+            memory_context=memory_context,
+            task_packet=task_packet,
+            on_text_delta=on_text_delta,
+        )
+    if canonical == "writing" and _writing_has_core_goal(content):
+        document = str((first.normalized_result or {}).get("document") or "").strip()
+        if _looks_like_clarification_response(document):
+            strict_suffix = (
+                "\n\n[强制写作约束] 用户已经给出足够主题信息。"
+                "不得要求补充发文机关、日期、联系人、值班电话等非核心字段；"
+                "必须直接输出可用草稿，未知细节统一用【XXX】占位。"
+            )
+            first = _execute_skill_once(
+                canonical,
+                content + strict_suffix,
+                requested_model,
+                attachments,
+                cookies,
+                runtime_context=runtime_context,
+                memory_context=memory_context,
+                task_packet=task_packet,
+                on_text_delta=on_text_delta,
+            )
     return first
 
 
 def render_assistant_html(skill_name: str, result: SkillExecutionResult, model_name: str) -> str:
     skill_name = canonical_agent_name(skill_name) or "general"
+    try:
+        title = get_agent_spec(skill_name).title
+    except ValueError:
+        title = skill_name
     blocks = [
-        f"<div class='assistant-copy'>模型 <strong>{escape(model_name)}</strong> 已完成 {escape(get_agent_spec(skill_name).title)} 任务。</div>"
+        f"<div class='assistant-copy'>模型 <strong>{escape(model_name)}</strong> 已完成 {escape(title)} 任务。</div>"
     ]
     for block in result.render_blocks:
-        title = escape(block.get("title") or "")
+        block_title = escape(block.get("title") or "")
         html = block.get("html") or "<p></p>"
-        blocks.append(f"<section class='assistant-block'><h4>{title}</h4>{html}</section>")
+        blocks.append(f"<section class='assistant-block'><h4>{block_title}</h4>{html}</section>")
     return "".join(blocks)

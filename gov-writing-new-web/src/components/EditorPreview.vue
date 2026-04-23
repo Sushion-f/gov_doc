@@ -1,32 +1,21 @@
 <script setup>
-import { computed, nextTick, ref, watch } from "vue";
+import { computed, ref, watch } from "vue";
 import { RouterLink } from "vue-router";
+import Editor from "@tinymce/tinymce-vue";
+import tinymce from "tinymce/tinymce";
+import "tinymce/icons/default";
+import "tinymce/models/dom";
+import "tinymce/themes/silver";
+import "tinymce/plugins/code";
+import "tinymce/plugins/codesample";
+import "tinymce/plugins/image";
+import "tinymce/plugins/link";
+import "tinymce/plugins/lists";
+import "tinymce/plugins/searchreplace";
+import "tinymce/plugins/table";
+import "tinymce/plugins/wordcount";
 
-/** UMD 脚本（见 public/html-docx.js），避免 Vite 无法打包该旧版 bundle */
-let htmlDocxLoading = null;
-function loadHtmlDocx() {
-  if (typeof window !== "undefined" && window.htmlDocx?.asBlob) {
-    return Promise.resolve(window.htmlDocx);
-  }
-  if (!htmlDocxLoading) {
-    htmlDocxLoading = new Promise((resolve, reject) => {
-      const s = document.createElement("script");
-      s.src = `${import.meta.env.BASE_URL}html-docx.js`;
-      s.async = true;
-      s.dataset.htmlDocx = "1";
-      s.onload = () => {
-        htmlDocxLoading = null;
-        resolve(window.htmlDocx);
-      };
-      s.onerror = () => {
-        htmlDocxLoading = null;
-        reject(new Error("无法加载 Word 导出库"));
-      };
-      document.head.appendChild(s);
-    });
-  }
-  return htmlDocxLoading;
-}
+import { fetchDocument, saveDocument } from "@/store";
 
 const props = defineProps({
   artifact: {
@@ -40,195 +29,369 @@ const props = defineProps({
 });
 
 const emit = defineEmits(["close"]);
-const activeAnnotationId = ref("");
-const sheetRef = ref(null);
 
-const metaPairs = computed(() => {
-  if (!props.artifact) {
-    return [];
-  }
-  const title = props.artifact.title?.trim() || "未命名文档";
-  return [
-    ["类型", props.artifact.artifactType || "document"],
-    ["标题", title],
-    ["摘要", props.artifact.summary || "可在此继续查看和编辑正文。"],
-  ];
-});
+const loading = ref(false);
+const saving = ref(false);
+const doc = ref(null);
+const html = ref("");
+const localTitle = ref("");
+const renaming = ref(false);
+const errorText = ref("");
 
-function sanitizeEditorHtml(value) {
-  const raw = value || "";
-  if (!raw) {
-    return "";
+const nodeId = computed(() => props.artifact?.workspaceNodeId || props.artifact?.nodeId || props.artifact?.id || "");
+const effectiveAnnotations = computed(() => doc.value?.annotations || props.annotations || []);
+const meta = computed(() => doc.value?.meta || {});
+const isEditable = computed(() => Boolean(meta.value.editable));
+const isPdfReadOnly = computed(() => meta.value.fileType === "pdf" && !isEditable.value);
+
+const tinyInit = computed(() => ({
+  height: 540,
+  menubar: false,
+  branding: false,
+  promotion: false,
+  base_url: "/tinymce",
+  suffix: ".min",
+  license_key: "gpl",
+  language: "zh_CN",
+  language_url: "/tinymce/langs/zh_CN.js",
+  skin_url: "/tinymce/skins/ui/oxide",
+  content_css: "/tinymce/skins/content/default/content.css",
+  plugins: "lists link table image code codesample searchreplace wordcount",
+  toolbar:
+    "undo redo | blocks | bold italic underline | bullist numlist | alignleft aligncenter alignright | table link image | searchreplace code codesample",
+  readonly: !isEditable.value,
+  statusbar: true,
+  resize: false,
+}));
+
+function plainTextFromHtml(source) {
+  return String(source || "")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/(p|div|li|h[1-6]|blockquote|tr)>/gi, "\n")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .replace(/[ \t]+/g, " ")
+    .trim();
+}
+
+async function loadDrawerDocument() {
+  if (!nodeId.value) {
+    doc.value = null;
+    html.value = "";
+    localTitle.value = "";
+    return;
   }
-  if (typeof document === "undefined") {
-    return raw;
+  loading.value = true;
+  errorText.value = "";
+  try {
+    const data = await fetchDocument(nodeId.value);
+    doc.value = data;
+    html.value = data.contentHtml || "<p></p>";
+    localTitle.value = data.title || props.artifact?.title || "未命名文档";
+    renaming.value = false;
+  } catch (error) {
+    errorText.value = String(error.message || error);
+  } finally {
+    loading.value = false;
   }
-  const tmp = document.createElement("div");
-  tmp.innerHTML = raw;
-  tmp.querySelectorAll(".planner-stream-panel, .reasoning-panel, h2.writing-thought").forEach((el) => el.remove());
-  return tmp.innerHTML;
 }
 
 watch(
-  () => props.artifact?.contentHtml,
-  async (value) => {
-    await nextTick();
-    if (sheetRef.value) {
-      sheetRef.value.innerHTML = sanitizeEditorHtml(value);
-    }
-    activeAnnotationId.value = "";
+  () => nodeId.value,
+  async () => {
+    await loadDrawerDocument();
   },
   { immediate: true }
 );
 
-function resolveRange(root, start, end) {
-  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-  let cursor = 0;
-  let startNode = null;
-  let endNode = null;
-  let startOffset = 0;
-  let endOffset = 0;
-
-  while (walker.nextNode()) {
-    const node = walker.currentNode;
-    const length = node.textContent?.length || 0;
-    const nextCursor = cursor + length;
-    if (!startNode && start <= nextCursor) {
-      startNode = node;
-      startOffset = Math.max(start - cursor, 0);
-    }
-    if (!endNode && end <= nextCursor) {
-      endNode = node;
-      endOffset = Math.max(end - cursor, 0);
-      break;
-    }
-    cursor = nextCursor;
-  }
-
-  if (!startNode || !endNode) {
-    return null;
-  }
-  return { startNode, startOffset, endNode, endOffset };
-}
-
-function focusAnnotation(annotation) {
-  if (!sheetRef.value) {
+async function handleSave() {
+  if (!nodeId.value || saving.value) {
     return;
   }
-  activeAnnotationId.value = annotation.id;
-  const resolved = resolveRange(sheetRef.value, annotation.start || 0, annotation.end || 0);
-  if (!resolved) {
-    return;
+  saving.value = true;
+  errorText.value = "";
+  try {
+    await saveDocument(nodeId.value, {
+      title: localTitle.value,
+      content_html: html.value,
+      content_text: plainTextFromHtml(html.value),
+      annotations: effectiveAnnotations.value,
+    });
+    await loadDrawerDocument();
+  } catch (error) {
+    errorText.value = String(error.message || error);
+  } finally {
+    saving.value = false;
   }
-  const selection = window.getSelection();
-  const range = document.createRange();
-  range.setStart(resolved.startNode, resolved.startOffset);
-  range.setEnd(resolved.endNode, resolved.endOffset);
-  selection?.removeAllRanges();
-  selection?.addRange(range);
-  resolved.startNode.parentElement?.scrollIntoView({ behavior: "smooth", block: "center" });
 }
 
-async function downloadWord() {
-  if (!sheetRef.value) {
+function beginRename() {
+  if (!doc.value) {
     return;
   }
-  const html = sheetRef.value.innerHTML || "<p></p>";
-  const { asBlob } = await loadHtmlDocx();
-  const blob = asBlob(`<!DOCTYPE html><html><head><meta charset="utf-8"></head><body>${html}</body></html>`);
-  const name = `${(props.artifact?.title || "文档").replace(/[/\\?%*:|"<>]/g, "-")}.docx`;
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = name;
-  a.click();
-  URL.revokeObjectURL(url);
+  renaming.value = true;
 }
 
-function downloadPdf() {
-  window.print();
+function finishRename() {
+  renaming.value = false;
+}
+
+function downloadUrl() {
+  if (!nodeId.value) {
+    return "#";
+  }
+  return `${import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000"}/api/agentloop/workspace/download/${nodeId.value}`;
 }
 </script>
 
 <template>
-  <aside class="editor-panel" :aria-hidden="artifact ? 'false' : 'true'">
-    <div class="editor-header">
+  <aside class="preview-drawer" :class="{ open: !!artifact }" :aria-hidden="artifact ? 'false' : 'true'">
+    <div class="preview-drawer-head">
+      <div class="preview-drawer-title">
+        <span class="preview-drawer-icon material-symbols-rounded">
+          {{ isPdfReadOnly ? "picture_as_pdf" : "description" }}
+        </span>
+        <div class="preview-drawer-copy">
+          <input
+            v-if="renaming"
+            v-model="localTitle"
+            class="preview-drawer-title-input"
+            type="text"
+            @blur="finishRename"
+            @keydown.enter.prevent="finishRename"
+          />
+          <h3 v-else @dblclick="beginRename">{{ localTitle || artifact?.title || "未命名文档" }}</h3>
+          <p>{{ artifact?.summary || meta.readOnlyReason || "在抽屉中查看并继续编辑工作区文档。" }}</p>
+        </div>
+      </div>
       <button class="icon-ghost" type="button" aria-label="关闭编辑器" @click="emit('close')">
         <span class="material-symbols-rounded">close</span>
       </button>
     </div>
 
-    <div class="editor-meta" v-if="artifact">
-      <div v-for="[label, value] in metaPairs" :key="label" class="editor-stat">
-        <label>{{ label }}</label>
-        <strong>{{ value }}</strong>
-      </div>
+    <div v-if="isPdfReadOnly" class="preview-drawer-banner">
+      PDF 只读，保存时会自动另存为 DOCX 后继续编辑。
     </div>
 
-    <div class="editor-toolbar" aria-label="富文本工具栏">
-      <div class="toolbar-group">
-        <button class="toolbar-button active" type="button">正文</button>
-        <button class="toolbar-button" type="button">标题</button>
-        <button class="toolbar-button" type="button">引用</button>
-      </div>
-      <div class="toolbar-divider" />
-      <div class="toolbar-group">
-        <button class="toolbar-button" type="button">
-          <span class="material-symbols-rounded" style="font-size: 16px">format_bold</span>
-          加粗
-        </button>
-        <button class="toolbar-button" type="button">
-          <span class="material-symbols-rounded" style="font-size: 16px">format_list_bulleted</span>
-          列表
-        </button>
-      </div>
-      <div class="toolbar-divider" />
-      <div class="toolbar-group">
-        <div class="toolbar-badge">
-          <span class="material-symbols-rounded" style="font-size: 16px">text_fields</span>
-          仿宋_GB2312 三号
-        </div>
-      </div>
-    </div>
-
-    <div class="editor-main" :class="{ 'no-issues': !annotations.length }">
-      <div class="editor-issue-list">
+    <div v-if="loading" class="preview-drawer-loading">正在加载文档内容…</div>
+    <div v-else-if="errorText" class="preview-drawer-error">{{ errorText }}</div>
+    <div v-else class="preview-drawer-body">
+      <div v-if="effectiveAnnotations.length" class="preview-drawer-annotations">
         <button
-          v-for="annotation in annotations"
+          v-for="annotation in effectiveAnnotations"
           :key="annotation.id"
-          class="editor-issue-item"
-          :class="{ active: activeAnnotationId === annotation.id }"
+          class="preview-drawer-annotation"
           type="button"
-          @click="focusAnnotation(annotation)"
         >
           <strong>{{ annotation.label }}</strong>
           <span>{{ annotation.description }}</span>
         </button>
       </div>
 
-      <div class="editor-sheet-wrap">
-        <div ref="sheetRef" class="editor-sheet" contenteditable="true">
-          <p v-if="!artifact">点击结果文件后，可在右侧编辑器继续修改正文。</p>
-        </div>
+      <div class="preview-drawer-editor">
+        <Editor
+          v-model="html"
+          license-key="gpl"
+          api-key="no-api-key"
+          :init="tinyInit"
+        />
       </div>
     </div>
 
-    <div class="editor-footer">
-      <div class="editor-footer-text">
-        {{ artifact?.summary || "点击结果文件后，可在右侧查看和编辑正文。" }}
+    <div class="preview-drawer-foot">
+      <div class="preview-drawer-meta">
+        {{ meta.fileType ? `${String(meta.fileType).toUpperCase()} · ${isEditable ? "可编辑" : "只读预览"}` : "" }}
       </div>
-      <div class="footer-actions">
-        <button v-if="artifact" class="secondary-pill" type="button" @click="downloadWord">下载 Word</button>
-        <button v-if="artifact" class="secondary-pill" type="button" @click="downloadPdf">下载 PDF</button>
+      <div class="preview-drawer-actions">
+        <a v-if="nodeId" class="secondary-pill" :href="downloadUrl()" target="_blank" rel="noreferrer">下载</a>
         <RouterLink
-          v-if="artifact?.workspaceNodeId"
+          v-if="nodeId"
           class="secondary-pill"
-          :to="{ name: 'editor', params: { id: artifact.workspaceNodeId } }"
+          :to="{ name: 'editor', params: { id: nodeId } }"
         >
           打开完整编辑页
         </RouterLink>
-        <button class="primary-pill" type="button" @click="emit('close')">关闭</button>
+        <button class="primary-pill" type="button" :disabled="saving || !nodeId" @click="handleSave">
+          {{ saving ? "保存中…" : isPdfReadOnly ? "保存为 DOCX" : "保存" }}
+        </button>
       </div>
     </div>
   </aside>
 </template>
+
+<style scoped>
+.preview-drawer {
+  position: fixed;
+  top: 24px;
+  right: 24px;
+  bottom: 24px;
+  width: min(780px, calc(100vw - 48px));
+  border-radius: 28px;
+  background: #fff;
+  box-shadow: 0 24px 60px rgba(18, 31, 53, 0.16);
+  border: 1px solid rgba(17, 24, 39, 0.08);
+  display: flex;
+  flex-direction: column;
+  transform: translateX(calc(100% + 40px));
+  opacity: 0;
+  pointer-events: none;
+  transition: transform 220ms ease, opacity 220ms ease;
+  z-index: 40;
+}
+
+.preview-drawer.open {
+  transform: translateX(0);
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.preview-drawer-head,
+.preview-drawer-foot {
+  padding: 20px 24px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.preview-drawer-head {
+  border-bottom: 1px solid rgba(17, 24, 39, 0.08);
+}
+
+.preview-drawer-title {
+  display: flex;
+  gap: 14px;
+  min-width: 0;
+}
+
+.preview-drawer-icon {
+  width: 44px;
+  height: 44px;
+  border-radius: 14px;
+  background: #eef5ff;
+  color: #0f6cbd;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.preview-drawer-copy {
+  min-width: 0;
+}
+
+.preview-drawer-copy h3 {
+  margin: 0;
+  font-size: 18px;
+  color: #132033;
+}
+
+.preview-drawer-copy p {
+  margin: 6px 0 0;
+  color: #6a7688;
+  font-size: 13px;
+}
+
+.preview-drawer-title-input {
+  width: min(420px, 100%);
+  border: 1px solid #c8d4e8;
+  border-radius: 12px;
+  padding: 10px 12px;
+  font-size: 16px;
+}
+
+.preview-drawer-banner,
+.preview-drawer-loading,
+.preview-drawer-error {
+  margin: 18px 24px 0;
+  padding: 12px 14px;
+  border-radius: 14px;
+  font-size: 13px;
+}
+
+.preview-drawer-banner {
+  background: #fff7e6;
+  color: #8a5a00;
+}
+
+.preview-drawer-loading {
+  background: #f5f8fc;
+  color: #506077;
+}
+
+.preview-drawer-error {
+  background: #fff1f2;
+  color: #b42318;
+}
+
+.preview-drawer-body {
+  flex: 1;
+  min-height: 0;
+  padding: 18px 24px;
+  display: flex;
+  gap: 18px;
+}
+
+.preview-drawer-annotations {
+  width: 220px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow: auto;
+}
+
+.preview-drawer-annotation {
+  border: 1px solid rgba(17, 24, 39, 0.08);
+  background: #fafcff;
+  border-radius: 16px;
+  padding: 12px;
+  text-align: left;
+}
+
+.preview-drawer-annotation strong {
+  display: block;
+  color: #152033;
+  margin-bottom: 6px;
+}
+
+.preview-drawer-annotation span {
+  color: #6b7280;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.preview-drawer-editor {
+  min-width: 0;
+  flex: 1;
+}
+
+.preview-drawer-meta {
+  color: #6b7280;
+  font-size: 12px;
+}
+
+.preview-drawer-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+@media (max-width: 960px) {
+  .preview-drawer {
+    top: 12px;
+    right: 12px;
+    bottom: 12px;
+    left: 12px;
+    width: auto;
+  }
+
+  .preview-drawer-body {
+    flex-direction: column;
+  }
+
+  .preview-drawer-annotations {
+    width: auto;
+    max-height: 160px;
+  }
+}
+</style>
