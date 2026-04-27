@@ -1,0 +1,53 @@
+[
+  {
+    "id": "0",
+    "read_me": "区县日报选项",
+    "data": []
+  },
+  {
+    "id": "1",
+    "read_me": "副市长日报选项",
+    "data": []
+  },
+  {
+    "backup": {
+      "区县日报选项": [
+        { "title": "区县A", "key": "区县A", "children": [], "selected": false, "isLeaf": true },
+        { "title": "区县B", "key": "区县B", "children": [], "selected": false, "isLeaf": true },
+        { "title": "区县C", "key": "区县C", "children": [], "selected": false, "isLeaf": true }
+      ],
+      "副市长日报选项": [
+        { "title": "领导A", "key": "领导A", "children": [], "selected": false, "isLeaf": true },
+        { "title": "领导B", "key": "领导B", "children": [], "selected": false, "isLeaf": true },
+        { "title": "领导C", "key": "领导C", "children": [], "selected": false, "isLeaf": true }
+      ],
+      "济南_区县日报选项": [
+        { "title": "历下区", "key": "历下区", "children": [], "selected": false, "isLeaf": true },
+        { "title": "市中区", "key": "市中区", "children": [], "selected": false, "isLeaf": true },
+        { "title": "槐荫区", "key": "槐荫区", "children": [], "selected": false, "isLeaf": true },
+        { "title": "天桥区", "key": "天桥区", "children": [], "selected": false, "isLeaf": true },
+        { "title": "历城区", "key": "历城区", "children": [], "selected": false, "isLeaf": true },
+        { "title": "济南高新区", "key": "济南高新区", "children": [], "selected": false, "isLeaf": true },
+        { "title": "起步区", "key": "起步区", "children": [], "selected": false, "isLeaf": true },
+        { "title": "南部山区", "key": "南部山区", "children": [], "selected": false, "isLeaf": true },
+        { "title": "长清区", "key": "长清区", "children": [], "selected": false, "isLeaf": true },
+        { "title": "章丘区", "key": "章丘区", "children": [], "selected": false, "isLeaf": true },
+        { "title": "济阳区", "key": "济阳区", "children": [], "selected": false, "isLeaf": true },
+        { "title": "莱芜区", "key": "莱芜区", "children": [], "selected": false, "isLeaf": true },
+        { "title": "钢城区", "key": "钢城区", "children": [], "selected": false, "isLeaf": true },
+        { "title": "平阴县", "key": "平阴县", "children": [], "selected": false, "isLeaf": true },
+        { "title": "商河县", "key": "商河县", "children": [], "selected": false, "isLeaf": true }
+      ],
+      "济南_副市长日报选项": [
+        { "title": "吕涛副市长", "key": "吕涛副市长", "children": [], "selected": false, "isLeaf": true },
+        { "title": "任庆虎副市长", "key": "任庆虎副市长", "children": [], "selected": false, "isLeaf": true },
+        { "title": "王茂祯副市长", "key": "王茂祯副市长", "children": [], "selected": false, "isLeaf": true },
+        { "title": "杨丽副市长", "key": "杨丽副市长", "children": [], "selected": false, "isLeaf": true },
+        { "title": "任广锋副市长", "key": "任广锋副市长", "children": [], "selected": false, "isLeaf": true }
+      ]
+    }
+  },
+  {
+    "read_me": "这里存储的是日报功能里面的静态数据。第一个对象id=0,里面存的是区县日报的选项，第二个id=1,是副市长日报的选项。备份数据可以往后叠加。"
+  }
+]

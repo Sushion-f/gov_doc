@@ -3,178 +3,198 @@ Pydantic 请求/响应模型（AgentLoop API）。
 
 - AgentLoopResponse：统一 JSON 外壳 code/message/data，路由层广泛使用。
 - ConversationRunRequest、Workspace*Request 等与前端字段名对齐（snake_case JSON）。
+- 所有模型都继承自 BaseModel，使用 Pydantic V2 语法。
 """
 
-from datetime import datetime
-from typing import Any, Literal
+from datetime import datetime  # 日期时间类型
+from typing import Any, Literal  # 类型注解
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field  # Pydantic 基础类和字段配置
 
 
 class AgentLoopResponse(BaseModel):
-    code: int = 0
-    message: str = "ok"
-    data: Any = None
+    """统一 API 响应模型。"""
+    code: int = 0  # 响应代码，0 表示成功
+    message: str = "ok"  # 响应消息
+    data: Any = None  # 响应数据
 
 
 class SkillDescriptor(BaseModel):
-    key: str
-    title: str
-    summary: str
-    examples: list[str] = Field(default_factory=list)
+    """技能描述符模型。"""
+    key: str  # 技能唯一标识
+    title: str  # 技能标题
+    summary: str  # 技能摘要
+    examples: list[str] = Field(default_factory=list)  # 使用示例列表
 
 
 class TaskPacket(BaseModel):
-    task_id: str
-    conversation_id: str
-    parent_task_id: str | None = None
-    objective: str
-    skill_name: str
-    scope: str | None = None
-    repo: str | None = None
-    branch_policy: str | None = None
-    acceptance_tests: list[str] = Field(default_factory=list)
-    commit_policy: str | None = None
-    team_id: str | None = None
-    subtask_role: str | None = None
-    input_payload: dict[str, Any] = Field(default_factory=dict)
-    attachments: list[dict[str, Any]] = Field(default_factory=list)
-    acceptance_criteria: list[str] = Field(default_factory=list)
-    reporting_contract: str
-    escalation_policy: str
-    user_memory_refs: list[str] = Field(default_factory=list)
-    resume_token: str | None = None
-    prompt_menu_contract: dict[str, Any] = Field(default_factory=dict)
-    source_state: str | None = None
+    """任务数据包模型。"""
+    task_id: str  # 任务 ID
+    conversation_id: str  # 会话 ID
+    parent_task_id: str | None = None  # 父任务 ID（用于子任务）
+    objective: str  # 任务目标
+    skill_name: str  # 技能名称
+    scope: str | None = None  # 任务范围
+    repo: str | None = None  # 代码仓库
+    branch_policy: str | None = None  # 分支策略
+    acceptance_tests: list[str] = Field(default_factory=list)  # 验收测试
+    commit_policy: str | None = None  # 提交策略
+    team_id: str | None = None  # 团队 ID
+    subtask_role: str | None = None  # 子任务角色
+    input_payload: dict[str, Any] = Field(default_factory=dict)  # 输入负载
+    attachments: list[dict[str, Any]] = Field(default_factory=list)  # 附件列表
+    acceptance_criteria: list[str] = Field(default_factory=list)  # 验收标准
+    reporting_contract: str  # 报告契约
+    escalation_policy: str  # 升级策略
+    user_memory_refs: list[str] = Field(default_factory=list)  # 用户记忆引用
+    resume_token: str | None = None  # 恢复令牌
+    prompt_menu_contract: dict[str, Any] = Field(default_factory=dict)  # 提示菜单契约
+    source_state: str | None = None  # 源状态
 
 
 class TaskEvent(BaseModel):
+    """任务事件模型（用于 SSE 事件流）。"""
     id: str
     run_id: str
     task_id: str
     parent_task_id: str | None = None
     seq_no: int
     event_type: Literal[
-        "created",
-        "running",
-        "tool_call",
+        "message_start",
+        "message_delta",
+        "message_stop",
+        "content_block_start",
+        "content_block_delta",
+        "content_block_stop",
+        "tool_result",
         "waiting_user",
-        "completed",
-        "failed",
+        "error",
     ]
-    status: str
-    title: str
-    detail: str | None = None
-    detail_html: str | None = None
+    event_index: int = 0
+    delta: dict[str, Any] | None = None
+    content_block: dict[str, Any] | None = None
     payload: dict[str, Any] = Field(default_factory=dict)
-    prompt_menu: dict[str, Any] = Field(default_factory=dict)
-    error_detail: str | None = None
     created_at: datetime
 
 
 class WorkspaceArtifactRef(BaseModel):
-    id: str
-    node_id: str | None = None
-    artifact_type: str
-    title: str
-    summary: str | None = None
-    content_html: str | None = None
-    version_no: int | None = None
-    source_run_id: str | None = None
+    """工作区产物引用模型。"""
+    id: str  # 产物 ID
+    node_id: str | None = None  # 节点 ID
+    artifact_type: str  # 产物类型
+    title: str  # 产物标题
+    summary: str | None = None  # 产物摘要
+    content_html: str | None = None  # 内容 HTML
+    version_no: int | None = None  # 版本号
+    source_run_id: str | None = None  # 来源运行 ID
 
 
 class SkillAdapterResult(BaseModel):
-    normalized_result: dict[str, Any] = Field(default_factory=dict)
-    render_blocks: list[dict[str, Any]] = Field(default_factory=list)
-    artifact_refs: list[dict[str, Any]] = Field(default_factory=list)
-    editor_annotations: list[dict[str, Any]] = Field(default_factory=list)
-    retryable: bool = False
-    source_state: str = "model_success"
-    error_detail: str | None = None
-    prompt_menu: dict[str, Any] = Field(default_factory=dict)
+    """技能适配器结果模型。"""
+    normalized_result: dict[str, Any] = Field(default_factory=dict)  # 标准化结果
+    render_blocks: list[dict[str, Any]] = Field(default_factory=list)  # 渲染块
+    artifact_refs: list[dict[str, Any]] = Field(default_factory=list)  # 产物引用
+    editor_annotations: list[dict[str, Any]] = Field(default_factory=list)  # 编辑器批注
+    retryable: bool = False  # 是否可重试
+    source_state: str = "model_success"  # 源状态
+    error_detail: str | None = None  # 错误详情
+    prompt_menu: dict[str, Any] = Field(default_factory=dict)  # 提示菜单
 
 
 class CompressionSnapshot(BaseModel):
-    id: str
-    summary: str
-    summary_markdown: str
-    stats: dict[str, Any] = Field(default_factory=dict)
-    created_at: datetime
+    """压缩快照模型。"""
+    id: str  # 快照 ID
+    summary: str  # 摘要
+    summary_markdown: str  # Markdown 格式摘要
+    stats: dict[str, Any] = Field(default_factory=dict)  # 统计信息
+    created_at: datetime  # 创建时间
 
 
 class UserIdentityProfile(BaseModel):
-    default_model: str | None = None
-    preferred_skills: list[str] = Field(default_factory=list)
-    recommendation_summary: str | None = None
-    identity: dict[str, Any] = Field(default_factory=dict)
-    memory: dict[str, Any] = Field(default_factory=dict)
-    identify_markdown: str = ""
-    memory_markdown: str = ""
-    session_summary_markdown: str = ""
+    """用户身份画像模型。"""
+    default_model: str | None = None  # 默认模型
+    preferred_skills: list[str] = Field(default_factory=list)  # 偏好技能
+    recommendation_summary: str | None = None  # 推荐摘要
+    identity: dict[str, Any] = Field(default_factory=dict)  # 身份信息
+    memory: dict[str, Any] = Field(default_factory=dict)  # 记忆信息
+    identify_markdown: str = ""  # 身份 Markdown
+    memory_markdown: str = ""  # 记忆 Markdown
+    session_summary_markdown: str = ""  # 会话摘要 Markdown
 
 
 class ConversationCreateRequest(BaseModel):
-    title: str | None = None
+    """创建对话请求模型。"""
+    title: str | None = None  # 对话标题
 
 
 class ConversationRenameRequest(BaseModel):
-    title: str | None = None
-    pinned: bool | None = None
+    """重命名对话请求模型。"""
+    title: str | None = None  # 新标题
+    pinned: bool | None = None  # 是否置顶
 
 
 class ConversationRunRequest(BaseModel):
-    content: str
-    model: str | None = None
-    skill: str | None = None
-    attachments: list[dict[str, Any]] = Field(default_factory=list)
-    resume_from_waiting: bool = False
-    selected_option: str | None = None
-    prompt_menu_input: str | None = None
+    """运行对话请求模型。"""
+    content: str  # 消息内容
+    title: str | None = None  # 会话标题（仅在新建会话时有效）
+    model: str | None = None  # 模型名称
+    skill: str | None = None  # 技能名称
+    attachments: list[dict[str, Any]] = Field(default_factory=list)  # 附件列表
+    resume_from_waiting: bool = False  # 是否从等待状态恢复
+    selected_option: str | None = None  # 选择的选项
+    prompt_menu_input: str | None = None  # 提示菜单输入
 
 
 class WorkspaceFolderCreateRequest(BaseModel):
-    name: str
-    parent_id: str | None = None
+    """创建工作区文件夹请求模型。"""
+    name: str  # 文件夹名称
+    parent_id: str | None = None  # 父文件夹 ID
 
 
 class WorkspaceDocumentCreateRequest(BaseModel):
-    name: str
-    parent_id: str | None = None
-    content_html: str | None = None
-    content_text: str | None = None
-    source: str | None = "manual"
+    """创建工作区文档请求模型。"""
+    name: str  # 文档名称
+    parent_id: str | None = None  # 父文件夹 ID
+    content_html: str | None = None  # 内容 HTML
+    content_text: str | None = None  # 内容文本
+    source: str | None = "manual"  # 来源：manual/conversation
 
 
 class WorkspaceDocumentUpdateRequest(BaseModel):
-    title: str | None = None
-    content_html: str | None = None
-    content_text: str | None = None
-    annotations: list[dict[str, Any]] = Field(default_factory=list)
+    """更新工作区文档请求模型。"""
+    title: str | None = None  # 文档标题
+    content_html: str | None = None  # 内容 HTML
+    content_text: str | None = None  # 内容文本
+    annotations: list[dict[str, Any]] = Field(default_factory=list)  # 批注列表
 
 
 class WorkspaceNodeRenameRequest(BaseModel):
-    name: str
+    """重命名工作区节点请求模型。"""
+    name: str  # 新名称
 
 
 class WorkspaceNodeMoveRequest(BaseModel):
-    parent_id: str | None = None
+    """移动工作区节点请求模型。"""
+    parent_id: str | None = None  # 新的父文件夹 ID
 
 
 class SettingsProfileUpdateRequest(BaseModel):
-    default_model: str | None = None
-    preferred_skills: list[str] = Field(default_factory=list)
-    recommendation_summary: str | None = None
+    """更新设置配置文件请求模型。"""
+    default_model: str | None = None  # 默认模型
+    preferred_skills: list[str] = Field(default_factory=list)  # 偏好技能
+    recommendation_summary: str | None = None  # 推荐摘要
 
 
 class MemoryUpdateRequest(BaseModel):
-    identity: dict[str, Any] = Field(default_factory=dict)
-    memory: dict[str, Any] = Field(default_factory=dict)
-    identify_markdown: str | None = None
-    memory_markdown: str | None = None
+    """更新记忆请求模型。"""
+    identity: dict[str, Any] = Field(default_factory=dict)  # 身份信息
+    memory: dict[str, Any] = Field(default_factory=dict)  # 记忆信息
+    identify_markdown: str | None = None  # 身份 Markdown
+    memory_markdown: str | None = None  # 记忆 Markdown
 
 
 class DictionaryEntryCreateRequest(BaseModel):
-    dict_type: Literal["whiteList", "blackList"]
-    word: str
-    notes: str | None = None
-
+    """创建词库条目请求模型。"""
+    dict_type: Literal["whiteList", "blackList"]  # 词库类型
+    word: str  # 词汇
+    notes: str | None = None  # 备注

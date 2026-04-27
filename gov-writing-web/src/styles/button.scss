@@ -1,0 +1,23 @@
+.btn {
+  border-radius: 24px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  padding: 8px 20px;
+  transition: all 0.3s ease;
+  color: #002f86;
+  line-height: 1;
+  background: rgba(0, 47, 134, 0.08);
+  border: 1px solid rgba(0, 47, 134, 0.2);
+
+  &-primary {
+    border: none;
+    font-weight: 600;
+    color: #ffffff;
+    background: linear-gradient(135deg, rgba(0, 47, 134, 1), rgba(50, 114, 231, 1));
+  }
+
+  &:hover {
+    transform: translateY(-1px);
+  }
+}

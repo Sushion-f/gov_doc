@@ -300,6 +300,13 @@ def build_handoff_content(
     step_skill: str,
     normalized_result: dict[str, Any],
 ) -> str:
+    """将上一步骤的结果拼接到 previous_input，形成下一步骤的 task_prompt。
+
+    对 retrieval：
+    - 若 LLM 兜底输出了整段摘要（summary_text），优先整段下传，而不是仅按 bullet 截断，
+      避免写作步骤拿到的只是去除结构的片段。
+    - 若 legacy 返回结构化 items，则取 top-N 的 title/summary 列点。
+    """
     step_skill = canonical_agent_name(step_skill) or step_skill
     clarification = (normalized_result.get("user_clarification") or "").strip()
     question = (normalized_result.get("question") or "").strip()
@@ -311,14 +318,32 @@ def build_handoff_content(
                 + clarification
                 + (f"\n补充针对问题：{question}" if question else "")
             )
+        summary_text = (normalized_result.get("summary_text") or "").strip()
+        if summary_text:
+            truncated = summary_text if len(summary_text) <= 4000 else summary_text[:4000] + "…"
+            return (
+                previous_input.strip()
+                + "\n\n【前序 retrieval 步骤提供的整段背景资料（请直接作为写作依据，不要再额外检索）】\n"
+                + truncated
+            )
         items = normalized_result.get("items") or []
         bullets: list[str] = []
-        for item in items[:5]:
-            title = item.get("title") or item.get("name") or "资料"
-            summary = item.get("summary") or item.get("content") or ""
-            bullets.append(f"- {title}: {summary}".strip())
+        for item in items[:8]:
+            if not isinstance(item, dict):
+                continue
+            title = (item.get("title") or item.get("name") or "资料").strip()
+            summary = (item.get("summary") or item.get("content") or "").strip()
+            if summary:
+                bullets.append(f"- {title}: {summary}")
+            else:
+                bullets.append(f"- {title}")
         if bullets:
-            return previous_input.strip() + "\n\n检索参考资料：\n" + "\n".join(bullets)
+            return (
+                previous_input.strip()
+                + "\n\n【前序 retrieval 步骤提供的参考资料要点】\n"
+                + "\n".join(bullets)
+                + "\n\n请基于以上要点完成下一步，不要再额外检索外部资料。"
+            )
         return previous_input
     if step_skill == "writing":
         if clarification:

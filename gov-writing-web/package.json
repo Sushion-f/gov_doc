@@ -1,0 +1,32 @@
+{
+  "name": "gov-writing-web",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "postinstall": "node scripts/copy-tinymce.mjs"
+  },
+  "dependencies": {
+    "@element-plus/icons-vue": "^2.3.2",
+    "@tinymce/tinymce-vue": "^6.3.0",
+    "axios": "^1.14.0",
+    "docx-preview": "^0.3.5",
+    "echarts": "^6.0.0",
+    "element-plus": "^2.13.6",
+    "pinia": "^3.0.3",
+    "pinia-plugin-persistedstate": "^4.5.0",
+    "tinymce": "^7.9.2",
+    "tinymce-i18n": "^26.4.6",
+    "vue": "^3.5.22",
+    "vue-router": "^4.6.3"
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.2",
+    "@vitejs/plugin-vue": "^6.0.1",
+    "sass": "^1.98.0",
+    "vite": "^7.1.7"
+  }
+}

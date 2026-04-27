@@ -1,4 +1,4 @@
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000";
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000/api";
 
 /** 默认 JSON 请求超时（毫秒） */
 export const DEFAULT_REQUEST_TIMEOUT_MS = 15000;
@@ -7,14 +7,14 @@ export const LONG_REQUEST_TIMEOUT_MS = 120000;
 /** 事件流文本拉取（bootstrap 选中会话时） */
 export const EVENT_STREAM_TIMEOUT_MS = 60000;
 
-function buildUrl(path) {
+function buildUrl (path) {
   return `${API_BASE_URL}${path}`;
 }
 
 /**
  * 合并超时 signal 与用户传入的 signal（任一方 abort 即中止）。
  */
-function resolveSignal(timeoutMs, userSignal) {
+function resolveSignal (timeoutMs, userSignal) {
   if (typeof AbortSignal === "undefined") {
     return undefined;
   }
@@ -22,11 +22,11 @@ function resolveSignal(timeoutMs, userSignal) {
     typeof AbortSignal.timeout === "function"
       ? AbortSignal.timeout(timeoutMs)
       : (() => {
-          const controller = new AbortController();
-          const id = window.setTimeout(() => controller.abort(), timeoutMs);
-          controller.signal.addEventListener("abort", () => window.clearTimeout(id), { once: true });
-          return controller.signal;
-        })();
+        const controller = new AbortController();
+        const id = window.setTimeout(() => controller.abort(), timeoutMs);
+        controller.signal.addEventListener("abort", () => window.clearTimeout(id), { once: true });
+        return controller.signal;
+      })();
   if (!userSignal) {
     return timed;
   }
@@ -40,7 +40,7 @@ function resolveSignal(timeoutMs, userSignal) {
   return merged.signal;
 }
 
-export async function requestJson(path, options = {}) {
+export async function requestJson (path, options = {}) {
   const { timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS, ...rest } = options;
   const signal = resolveSignal(timeoutMs, rest.signal);
   const response = await fetch(buildUrl(path), {
@@ -59,7 +59,7 @@ export async function requestJson(path, options = {}) {
   return response.json();
 }
 
-export async function requestText(path, options = {}) {
+export async function requestText (path, options = {}) {
   const { timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS, ...rest } = options;
   const signal = resolveSignal(timeoutMs, rest.signal);
   const response = await fetch(buildUrl(path), {
@@ -74,7 +74,7 @@ export async function requestText(path, options = {}) {
   return response.text();
 }
 
-export async function uploadFile(path, file, options = {}) {
+export async function uploadFile (path, file, options = {}) {
   const { timeoutMs = 60000, ...rest } = options;
   const signal = resolveSignal(timeoutMs, rest.signal);
   const formData = new FormData();
@@ -92,7 +92,7 @@ export async function uploadFile(path, file, options = {}) {
   return response.json();
 }
 
-export async function postForm(path, formData, options = {}) {
+export async function postForm (path, formData, options = {}) {
   const { timeoutMs = 60000, ...rest } = options;
   const signal = resolveSignal(timeoutMs, rest.signal);
   const response = await fetch(buildUrl(path), {
@@ -108,19 +108,19 @@ export async function postForm(path, formData, options = {}) {
   return response.json();
 }
 
-export async function readEventStream(path, options = {}) {
+export async function readEventStream (path, options = {}) {
   const events = [];
   await streamEventStream(path, {
     ...options,
-    onEvent(event) {
+    onEvent (event) {
       events.push(event);
     },
   });
   return events;
 }
 
-export async function streamEventStream(path, options = {}) {
-  const { timeoutMs = LONG_REQUEST_TIMEOUT_MS, onEvent = () => {}, signal: userSignal } = options;
+export async function streamEventStream (path, options = {}) {
+  const { timeoutMs = LONG_REQUEST_TIMEOUT_MS, onEvent = () => { }, signal: userSignal } = options;
   const signal = resolveSignal(timeoutMs, userSignal);
   const response = await fetch(buildUrl(path), {
     credentials: "include",

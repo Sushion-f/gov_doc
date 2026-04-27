@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable
 from typing import Any
 
@@ -10,6 +11,44 @@ from app.config import settings
 from app.debug_log import log_stage
 from app.llm import LLMCallError, call_chat_model_with_messages_raw
 from tools.agent_tool import AgentTool
+
+
+_THINK_TAG_RE = re.compile(r"<think>\s*(.*?)\s*</think>\s*", re.DOTALL | re.IGNORECASE)
+_OPEN_THINK_RE = re.compile(r"<\s*think\s*>\s*", re.IGNORECASE)
+_CLOSE_THINK_RE = re.compile(r"<\s*/\s*think\s*>\s*", re.IGNORECASE)
+
+
+def split_think_content(content: str) -> tuple[str, str]:
+    """分离 ``<think>...</think>`` 推理段与真正的助手回复。
+
+    兼容：
+    - 完整闭合：``<think>R</think>A`` → ``("R", "A")``
+    - 多段 think：依次累加到 reasoning
+    - 未闭合（流式中间态）：``<think>R...`` → ``("R...", "")``
+    - 漂移的尾部 ``</think>``：直接剔除
+    - 无标签：返回 ``("", content)``
+    """
+    if not isinstance(content, str) or not content:
+        return "", ""
+    reasoning_parts: list[str] = []
+    cleaned = content
+    while True:
+        m = _THINK_TAG_RE.search(cleaned)
+        if not m:
+            break
+        reasoning_parts.append(m.group(1).strip())
+        cleaned = cleaned[: m.start()] + cleaned[m.end():]
+    open_match = _OPEN_THINK_RE.search(cleaned)
+    if open_match:
+        tail = cleaned[open_match.end():]
+        # 尾部可能仍带 </think>（边界异常），一并剥离
+        tail = _CLOSE_THINK_RE.sub("", tail)
+        reasoning_parts.append(tail.strip())
+        cleaned = cleaned[: open_match.start()]
+    else:
+        cleaned = _CLOSE_THINK_RE.sub("", cleaned)
+    reasoning = "\n\n".join(part for part in reasoning_parts if part).strip()
+    return reasoning, cleaned.strip()
 
 
 class MainAgent:
@@ -68,24 +107,98 @@ class MainAgent:
                 if on_planner_stream:
                     on_planner_stream(ev)
 
-            response = call_chat_model_with_messages_raw(
-                messages,
-                settings.planner_model or requested_model,
-                purpose="planner",
-                temperature=settings.planner_temperature,
-                extra_payload={
-                    "tools": [tool_schema],
-                    "tool_choice": "auto",
-                },
-                stream=use_stream,
-                on_stream_event=_stream_cb if use_stream else None,
+            def _call_planner(*, strip_hint: bool = False, tool_choice: str = "auto") -> dict[str, Any]:
+                """实际发起 planner 请求。
+
+                - ``strip_hint`` 为 True 时临时关闭 disable_thinking / chat_template_kwargs，
+                  规避部分网关对未知字段或 /no_think 附加文本不兼容而返回 400/422。
+                - ``tool_choice`` 通常为 ``auto``；对写作类意图可尝试 ``required`` 强制至少一次 tool call
+                  （网关不支持时由外层重试回退为 ``auto``）。
+                """
+                purpose = "planner.retry_no_think_hint" if strip_hint else "planner"
+                if not strip_hint:
+                    return call_chat_model_with_messages_raw(
+                        messages,
+                        settings.planner_model or requested_model,
+                        purpose=purpose,
+                        temperature=settings.planner_temperature,
+                        extra_payload={
+                            "tools": [tool_schema],
+                            "tool_choice": tool_choice,
+                        },
+                        stream=use_stream,
+                        on_stream_event=_stream_cb if use_stream else None,
+                    )
+                _prev = settings.llm_disable_thinking
+                _prev_kwargs = settings.llm_send_chat_template_kwargs
+                try:
+                    settings.llm_disable_thinking = False
+                    settings.llm_send_chat_template_kwargs = False
+                    return call_chat_model_with_messages_raw(
+                        messages,
+                        settings.planner_model or requested_model,
+                        purpose=purpose,
+                        temperature=settings.planner_temperature,
+                        extra_payload={
+                            "tools": [tool_schema],
+                            "tool_choice": tool_choice,
+                        },
+                        stream=use_stream,
+                        on_stream_event=_stream_cb if use_stream else None,
+                    )
+                finally:
+                    settings.llm_disable_thinking = _prev
+                    settings.llm_send_chat_template_kwargs = _prev_kwargs
+
+            writing_intent = self._looks_like_writing_request(user_message)
+            preferred_tool_choice = (
+                "required"
+                if (settings.planner_force_tool_for_writing and writing_intent)
+                else "auto"
             )
+            # 分步重试：写作意图优先 required；失败则 auto + 正常 hint；再失败则 auto + 去掉 hint。
+            trial_plan: list[tuple[str, bool, str]] = []
+            if preferred_tool_choice == "required":
+                trial_plan.append(("required", False, "planner.tool_choice.required"))
+            trial_plan.append(("auto", False, "planner.tool_choice.auto"))
+            trial_plan.append(("auto", True, "planner.strip_hint_then_auto"))
+
+            last_exc: LLMCallError | None = None
+            response: dict[str, Any] | None = None
+            for tc, strip_hint, strategy in trial_plan:
+                try:
+                    response = _call_planner(strip_hint=strip_hint, tool_choice=tc)
+                    last_exc = None
+                    break
+                except LLMCallError as exc:
+                    last_exc = exc
+                    log_stage(
+                        "planner.retry",
+                        {
+                            "reason": str(exc),
+                            "strategy": strategy,
+                            "toolChoice": tc,
+                            "stripHint": strip_hint,
+                        },
+                        enabled=settings.debug_runtime_logs,
+                        max_chars=settings.debug_log_max_chars,
+                        max_string_chars=settings.debug_log_max_string_chars,
+                    )
+            if response is None:
+                if last_exc is not None:
+                    raise last_exc
+                raise LLMCallError("planner: 无可用响应")
             message = response.get("message") or {}
             if on_planner_stream:
+                raw_content_flush = self._message_text(message)
+                raw_reasoning_flush = self._message_reasoning(message).strip()
+                # Qwen3 等将推理写入 content 内的 <think>...</think>；
+                # flush 前把推理与正文拆开，避免 thinking_delta 混入 <think> 标签或重复打印正文。
+                embedded_reasoning_flush, body_flush = split_think_content(raw_content_flush)
                 on_planner_stream(
                     {
-                        "reasoning": self._message_reasoning(message),
-                        "text": self._message_text(message),
+                        "reasoning": raw_reasoning_flush or embedded_reasoning_flush,
+                        "text": body_flush,
                         "flush": True,
                     }
                 )
@@ -230,8 +343,13 @@ class MainAgent:
     ) -> tuple[ExecutionPlan, dict[str, Any]]:
         message = response.get("message") or {}
         tool_calls = message.get("tool_calls") or []
-        assistant_text = self._message_text(message).strip()
-        reasoning_content = self._message_reasoning(message).strip()
+        raw_content = self._message_text(message)
+        raw_reasoning = self._message_reasoning(message).strip()
+        # Qwen3 / DeepSeek-R1 风格：推理可能嵌在 content 的 <think>...</think> 中，
+        # 需要剥离后再作为 assistant_text，否则会导致"思考过程反复出现在多个事件里"。
+        embedded_reasoning, assistant_text_body = split_think_content(raw_content)
+        assistant_text = assistant_text_body.strip()
+        reasoning_content = raw_reasoning or embedded_reasoning
         if tool_calls:
             steps: list[ExecutionStep] = []
             previous_step_ids: list[str] = []
@@ -270,9 +388,68 @@ class MainAgent:
                 },
             )
 
+        # 模型未触发 tool_call：
+        # 1) 若是明确的公文写作意图，兜底构造 retrieval + writing 两步计划，
+        #    避免"想得很好但一步都没执行"的退化体验；
+        # 2) 否则按 direct answer 处理，但只用剥离 <think> 后的正文，
+        #    若正文为空（模型只输出了 reasoning），直接走 general sub agent。
+        if self._looks_like_writing_request(user_message):
+            retrieval_spec = get_agent_spec("retrieval")
+            writing_spec = get_agent_spec("writing")
+            retrieval_depends_sid = "step_01_retrieval"
+            steps = [
+                ExecutionStep(
+                    index=1,
+                    skill_name=retrieval_spec.name,
+                    title=retrieval_spec.title,
+                    objective=(
+                        f"围绕用户需求「{(user_message or '').strip()[:80]}」检索可用范例、政策依据与写作要点，"
+                        "产出结构化要点，供后续写作引用。"
+                    ),
+                    scope=retrieval_spec.scope,
+                    subtask_role=retrieval_spec.default_subtask_role,
+                ),
+                ExecutionStep(
+                    index=2,
+                    skill_name=writing_spec.name,
+                    title=writing_spec.title,
+                    objective=(
+                        "整合前序检索得到的要点与用户原始需求，起草符合公文格式的完整正文。"
+                    ),
+                    scope=writing_spec.scope,
+                    depends_on=[retrieval_depends_sid],
+                    subtask_role=writing_spec.default_subtask_role,
+                ),
+            ]
+            plan_summary = (
+                assistant_text
+                or "模型未主动调度工具，按公文写作意图回退至检索 + 写作两步计划。"
+            )
+            return (
+                ExecutionPlan(
+                    intent="document_workflow",
+                    summary=plan_summary,
+                    steps=steps,
+                ),
+                {
+                    "planner": "main_agent_writing_fallback",
+                    "fallback": True,
+                    "dispatchMode": "auto_retrieval_writing",
+                    "modelName": response["model_name"],
+                    "assistantText": assistant_text,
+                    "reasoningContent": reasoning_content,
+                    "raw": response["raw"],
+                    "normalization": {
+                        "type": "writing_fallback_on_missing_tool_call",
+                        "reason": "planner_returned_text_only_for_writing_request",
+                        "dependsOn": [retrieval_depends_sid],
+                    },
+                },
+            )
+
         direct_plan = build_fallback_execution_plan(user_message, None, attachments)
-        summary = assistant_text or "主 Agent 直接回答当前问题，无需调度 sub agent。"
-        direct_plan.summary = summary
+        effective_summary = assistant_text or "模型未返回直接可用的答复，已切换到默认处理流程。"
+        direct_plan.summary = effective_summary
         return (
             direct_plan,
             {
@@ -282,7 +459,9 @@ class MainAgent:
                 "modelName": response["model_name"],
                 "assistantText": assistant_text,
                 "reasoningContent": reasoning_content,
-                "directAnswer": assistant_text,
+                # 仅当模型剥离 <think> 后确实给出了正文才作为 directAnswer 下发，
+                # 否则下游不会把"空字符串"或"纯思考内容"直接展示给用户。
+                "directAnswer": assistant_text or None,
                 "raw": response["raw"],
             },
         )
@@ -320,26 +499,51 @@ class MainAgent:
             return False
         strong_markers = (
             "不是只检索",
+            "不只是检索",
             "帮我写",
             "写一篇",
+            "写一份",
+            "写个",
+            "写篇",
             "起草",
             "撰写",
+            "拟写",
+            "拟一份",
+            "拟一篇",
+            "拟发",
+            "拟稿",
             "生成",
+            "生草",
+            "起稿",
+            "形成文稿",
         )
         doc_markers = (
             "报告",
             "通知",
             "方案",
             "请示",
+            "批复",
+            "决定",
+            "函",
+            "意见",
             "总结",
             "汇报",
             "发言稿",
             "讲话稿",
+            "致辞",
+            "倡议书",
+            "动员令",
+            "公告",
             "公文",
             "正文",
+            "纪要",
+            "情况说明",
+            "安排",
+            "工作部署",
+            "实施方案",
         )
         return any(marker in text for marker in strong_markers) or (
-            any(marker in text for marker in ("写", "起草", "撰写", "生成"))
+            any(marker in text for marker in ("写", "起草", "撰写", "生成", "拟"))
             and any(marker in text for marker in doc_markers)
         )
 

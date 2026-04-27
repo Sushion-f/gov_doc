@@ -8,7 +8,7 @@ def register_builtin_sub_agents() -> None:
     AgentRegistry.register(
         AgentDefinition(
             name="retrieval",
-            display_name="检索",
+            display_name="资料检索",
             description="从知识库、历史公文、法规库中检索相关内容。",
             system_prompt_path="prompts/sub/retrieval.md",
             tools=["knowledge_base_search", "law_search", "doc_history_query"],
@@ -26,7 +26,7 @@ def register_builtin_sub_agents() -> None:
     AgentRegistry.register(
         AgentDefinition(
             name="writing",
-            display_name="写作",
+            display_name="公文写作",
             description="根据用户需求起草、续写、改写公文正文。",
             system_prompt_path="prompts/sub/writing.md",
             tools=["template_render", "doc_write", "outline_generate"],
@@ -44,7 +44,7 @@ def register_builtin_sub_agents() -> None:
     AgentRegistry.register(
         AgentDefinition(
             name="review",
-            display_name="审核",
+            display_name="公文审核",
             description="对公文进行合规性、语义准确性、措辞规范性审核并标注问题。",
             system_prompt_path="prompts/sub/review.md",
             tools=["compliance_check", "semantic_check", "highlight_issues"],
@@ -61,7 +61,7 @@ def register_builtin_sub_agents() -> None:
     AgentRegistry.register(
         AgentDefinition(
             name="dedup",
-            display_name="查重",
+            display_name="公文查重",
             description="检测公文内容与历史文档的相似度，并标注重复片段。",
             system_prompt_path="prompts/sub/dedup.md",
             tools=["similarity_search", "source_trace", "highlight_duplicate"],
@@ -79,7 +79,7 @@ def register_builtin_sub_agents() -> None:
     AgentRegistry.register(
         AgentDefinition(
             name="layout",
-            display_name="排版",
+            display_name="公文排版",
             description="按照党政机关公文格式标准对公文进行排版建议或输出。",
             system_prompt_path="prompts/sub/layout.md",
             tools=["format_apply", "doc_export", "style_check"],

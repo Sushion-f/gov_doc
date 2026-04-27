@@ -1,0 +1,165 @@
+/* 公共弹窗样式 */
+.el-dialog,
+.el-message-box {
+  z-index: 3000;
+  background: #ffffff;
+  border-radius: 8px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+
+.el-message-box__header {
+  padding: 8px 24px 16px;
+  border-bottom: 1px solid #ebeef5;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.el-message-box__title {
+  font-size: 16px;
+  font-weight: 600;
+  color: #303133;
+  margin: 0;
+}
+
+.el-message-box__content {
+  padding: 24px;
+}
+
+.el-message-box__headerbtn {
+  top: unset;
+  right: 16px;
+}
+
+.el-message-box__btns {
+  padding: 0 16px 8px;
+  border-top: none;
+  display: flex;
+  justify-content: flex-end;
+
+  .el-button {
+    min-width: 80px;
+    padding: 8px 16px;
+    border-radius: 20px;
+    color: #0b57d0;
+    font-weight: 500;
+  }
+
+  .el-button:not(.el-button--primary):hover {
+    color: #1976d2;
+    border-color: #0b57d0;
+  }
+}
+
+.el-dialog__header {
+  padding: 0 24px 16px;
+  border-bottom: 1px solid #ebeef5;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.el-dialog__title {
+  font-size: 16px;
+  font-weight: 600;
+  color: #303133;
+  margin: 0;
+}
+
+.el-dialog__headerbtn {
+  top: 6px;
+  right: 24px;
+}
+
+.el-dialog__body {
+  padding: 20px;
+
+  .el-input__wrapper {
+    border-radius: 8px;
+    border: 1px solid #dcdfe6;
+    box-shadow: none;
+    transition: all 0.3s ease;
+    height: 40px;
+  }
+
+  .el-input__wrapper:hover {
+    border-color: #409eff;
+    box-shadow: 0 0 0 2px rgba(64, 158, 255, 0.2);
+  }
+
+  .el-input__wrapper.is-focus {
+    border-color: #409eff;
+    box-shadow: 0 0 0 2px rgba(64, 158, 255, 0.2);
+  }
+}
+
+.el-dialog__footer {
+  padding: 0 24px 8px;
+  border-top: none;
+  display: flex;
+  justify-content: flex-end;
+
+  .el-button {
+    font-size: 14px;
+    font-weight: 500;
+    padding: 8px 16px;
+    transition: all 0.3s ease;
+    min-width: 80px;
+    border-radius: 20px;
+  }
+
+  .el-button--primary {
+    background: #0b57d0;
+    border-color: #0b57d0;
+    color: #ffffff;
+    font-weight: 600;
+    border-radius: 20px;
+    box-shadow: 0 2px 4px rgba(11, 87, 208, 0.2);
+  }
+
+  .el-button--primary:hover {
+    background: #1976d2;
+    border-color: #1976d2;
+    box-shadow: 0 4px 8px rgba(11, 87, 208, 0.3);
+  }
+
+  .el-button--default {
+    color: #0b57d0;
+    font-weight: 500;
+  }
+
+  .el-button--default:hover {
+    color: #1976d2;
+    border-color: #0b57d0;
+  }
+}
+
+/* ElMessageBox按钮样式 */
+.el-message-box__btns .el-button--primary {
+  background: #0b57d0;
+  border-color: #0b57d0;
+  color: #ffffff;
+  font-weight: 600;
+  border-radius: 20px;
+  box-shadow: 0 2px 4px rgba(11, 87, 208, 0.2);
+}
+
+.el-message-box__btns .el-button--primary:hover {
+  background: #1976d2;
+  border-color: #1976d2;
+  box-shadow: 0 4px 8px rgba(11, 87, 208, 0.3);
+}
+
+.el-message-box__btns .el-button--default {
+  color: #0b57d0;
+  border-color: #dcdfe6;
+  background: #ffffff;
+  font-weight: 500;
+  border-radius: 20px;
+}
+
+.el-message-box__btns .el-button--default:hover {
+  color: #1976d2;
+  border-color: #0b57d0;
+  background: #ecf5ff;
+}
